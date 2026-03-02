@@ -61,9 +61,24 @@ class DatabaseManager:
                     dedicated_password TEXT,
                     description TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    code_path TEXT DEFAULT '',
+                    data_path TEXT DEFAULT '',
+                    auth_type TEXT DEFAULT 'password',
+                    key_path TEXT DEFAULT ''
                 )
             ''')
+            # 迁移：为旧表添加 code_path, data_path 列
+            cursor.execute("PRAGMA table_info(servers)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if 'code_path' not in cols:
+                cursor.execute("ALTER TABLE servers ADD COLUMN code_path TEXT DEFAULT ''")
+            if 'data_path' not in cols:
+                cursor.execute("ALTER TABLE servers ADD COLUMN data_path TEXT DEFAULT ''")
+            if 'auth_type' not in cols:
+                cursor.execute("ALTER TABLE servers ADD COLUMN auth_type TEXT DEFAULT 'password'")
+            if 'key_path' not in cols:
+                cursor.execute("ALTER TABLE servers ADD COLUMN key_path TEXT DEFAULT ''")
             
             # 创建管理员表
             cursor.execute('''
@@ -157,7 +172,7 @@ class DatabaseManager:
             
             conn.commit()
     
-    def add_server(self, name, ip, port, username, password, description='', dedicated_password=None):
+    def add_server(self, name, ip, port, username, password, description='', dedicated_password=None, code_path='', data_path='', auth_type='password', key_path=''):
         """添加服务器"""
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -167,9 +182,9 @@ class DatabaseManager:
                 encrypted_username = self.encrypt_data(username)
                 
                 cursor.execute('''
-                    INSERT INTO servers (name, ip, port, username, password, dedicated_password, description)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (name, ip, port, encrypted_username, password, dedicated_password, description))
+                    INSERT INTO servers (name, ip, port, username, password, dedicated_password, description, code_path, data_path, auth_type, key_path)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (name, ip, port, encrypted_username, password, dedicated_password, description, code_path or '', data_path or '', auth_type or 'password', key_path or ''))
                 
                 conn.commit()
                 return True, "服务器添加成功"
@@ -198,7 +213,11 @@ class DatabaseManager:
                         'description': row[6],
                         'created_at': row[7],
                         'updated_at': row[8],
-                        'dedicated_password': row[9] if row[9] else None,  # 明文存储，直接返回
+                        'dedicated_password': row[9] if len(row) > 9 and row[9] else None,
+                        'code_path': row[10] if len(row) > 10 and row[10] else '',
+                        'data_path': row[11] if len(row) > 11 and row[11] else '',
+                        'auth_type': row[12] if len(row) > 12 and row[12] else 'password',
+                        'key_path': row[13] if len(row) > 13 and row[13] else '',
                     }
                     servers.append(server)
                 
@@ -222,18 +241,22 @@ class DatabaseManager:
                         'ip': row[2],
                         'port': row[3],
                         'username': self.decrypt_data(row[4]),
-                        'password': row[5],  # 明文存储，直接返回
+                        'password': row[5],
                         'description': row[6],
                         'created_at': row[7],
                         'updated_at': row[8],
-                        'dedicated_password': row[9] if row[9] else None,  # 明文存储，直接返回
+                        'dedicated_password': row[9] if len(row) > 9 and row[9] else None,
+                        'code_path': row[10] if len(row) > 10 and row[10] else '',
+                        'data_path': row[11] if len(row) > 11 and row[11] else '',
+                        'auth_type': row[12] if len(row) > 12 and row[12] else 'password',
+                        'key_path': row[13] if len(row) > 13 and row[13] else '',
                     }
                 return None
         except Exception as e:
             print(f"获取服务器失败: {str(e)}")
             return None
     
-    def update_server(self, server_id, name=None, ip=None, port=None, username=None, password=None, description=None, dedicated_password=None):
+    def update_server(self, server_id, name=None, ip=None, port=None, username=None, password=None, description=None, dedicated_password=None, code_path=None, data_path=None, auth_type=None, key_path=None):
         """更新服务器信息"""
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -273,6 +296,22 @@ class DatabaseManager:
                 if description is not None:
                     update_fields.append('description = ?')
                     values.append(description)
+                
+                if code_path is not None:
+                    update_fields.append('code_path = ?')
+                    values.append(code_path)
+                
+                if data_path is not None:
+                    update_fields.append('data_path = ?')
+                    values.append(data_path)
+                
+                if auth_type is not None:
+                    update_fields.append('auth_type = ?')
+                    values.append(auth_type)
+                
+                if key_path is not None:
+                    update_fields.append('key_path = ?')
+                    values.append(key_path)
                 
                 update_fields.append('updated_at = CURRENT_TIMESTAMP')
                 values.append(server_id)

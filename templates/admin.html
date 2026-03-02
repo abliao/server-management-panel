@@ -504,8 +504,21 @@
                 </div>
 
                 <div class="form-group">
+                    <label for="server-auth-type">认证方式</label>
+                    <select id="server-auth-type" onchange="toggleAuthFields()">
+                        <option value="password">密码</option>
+                        <option value="key">密钥</option>
+                    </select>
+                </div>
+
+                <div class="form-group" id="server-password-group">
                     <label for="server-password">密码 *</label>
-                    <input type="text" id="server-password" required>
+                    <input type="text" id="server-password" placeholder="密码认证时必填">
+                </div>
+
+                <div class="form-group" id="server-key-path-group" style="display:none;">
+                    <label for="server-key-path">密钥路径 *</label>
+                    <input type="text" id="server-key-path" placeholder="如 /home/admin/.ssh/id_rsa（管理面板所在机器的路径）">
                 </div>
 
                 <div class="form-group">
@@ -519,6 +532,16 @@
                 <div class="form-group">
                     <label for="server-description">描述</label>
                     <textarea id="server-description" placeholder="可选的服务器描述"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label for="server-code-path">代码路径</label>
+                    <input type="text" id="server-code-path" placeholder="/home/project（该服务器上的项目根目录）">
+                </div>
+
+                <div class="form-group">
+                    <label for="server-data-path">数据路径</label>
+                    <input type="text" id="server-data-path" placeholder="/data（该服务器上的数据目录）">
                 </div>
 
                 <div class="form-actions">
@@ -710,6 +733,9 @@
                             <th>IP地址</th>
                             <th>端口</th>
                             <th>用户名</th>
+                            <th>认证</th>
+                            <th>代码路径</th>
+                            <th>数据路径</th>
                             <th>描述</th>
                             <th>创建时间</th>
                             <th>操作</th>
@@ -722,6 +748,9 @@
                                 <td>${server.ip}</td>
                                 <td>${server.port}</td>
                                 <td>${server.username}</td>
+                                <td>${server.auth_type === 'key' ? '密钥' : '密码'}</td>
+                                <td><code style="font-size:0.8em">${server.code_path || '-'}</code></td>
+                                <td><code style="font-size:0.8em">${server.data_path || '-'}</code></td>
                                 <td>${server.description || '-'}</td>
                                 <td>${new Date(server.created_at).toLocaleDateString()}</td>
                                 <td>
@@ -754,6 +783,8 @@
             document.getElementById('server-form').reset();
             document.getElementById('server-port').value = '22';
             document.getElementById('server-dedicated-password').value = '';
+            document.getElementById('server-auth-type').value = 'password';
+            toggleAuthFields();
             document.getElementById('server-modal').style.display = 'flex';
         }
 
@@ -774,8 +805,19 @@
             document.getElementById('server-password').value = server.password;
             document.getElementById('server-dedicated-password').value = server.dedicated_password || '';
             document.getElementById('server-description').value = server.description || '';
+            document.getElementById('server-code-path').value = server.code_path || '';
+            document.getElementById('server-data-path').value = server.data_path || '';
+            document.getElementById('server-auth-type').value = server.auth_type || 'password';
+            document.getElementById('server-key-path').value = server.key_path || '';
             
             document.getElementById('server-modal').style.display = 'flex';
+            toggleAuthFields();
+        }
+
+        function toggleAuthFields() {
+            const authType = document.getElementById('server-auth-type').value;
+            document.getElementById('server-password-group').style.display = authType === 'password' ? 'block' : 'none';
+            document.getElementById('server-key-path-group').style.display = authType === 'key' ? 'block' : 'none';
         }
 
         // 关闭服务器模态框
@@ -795,7 +837,11 @@
                 username: document.getElementById('server-username').value,
                 password: document.getElementById('server-password').value,
                 description: document.getElementById('server-description').value,
-                dedicated_password: document.getElementById('server-dedicated-password').value
+                dedicated_password: document.getElementById('server-dedicated-password').value,
+                code_path: document.getElementById('server-code-path').value,
+                data_path: document.getElementById('server-data-path').value,
+                auth_type: document.getElementById('server-auth-type').value,
+                key_path: document.getElementById('server-key-path').value
             };
 
             try {

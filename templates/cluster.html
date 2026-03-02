@@ -161,16 +161,8 @@
         <!-- 全局配置 -->
         <div class="section">
             <h2><i class="fas fa-sliders-h"></i> 集群配置</h2>
-            <p style="color:#8b949e;font-size:0.85rem;margin-bottom:12px;">代码和数据路径需在所有服务器上一致，以实现集群效果</p>
+            <p style="color:#8b949e;font-size:0.85rem;margin-bottom:12px;">各服务器的代码路径、数据路径请在【管理面板 → 服务器编辑】中单独配置</p>
             <div class="form-row">
-                <div class="form-group">
-                    <label>代码路径</label>
-                    <input type="text" id="cfg-code-path" placeholder="/home/project">
-                </div>
-                <div class="form-group">
-                    <label>数据路径</label>
-                    <input type="text" id="cfg-data-path" placeholder="/data">
-                </div>
                 <div class="form-group">
                     <label>空闲GPU显存阈值(%)</label>
                     <input type="number" id="cfg-mem-th" value="20" min="0" max="100">
@@ -324,8 +316,6 @@
             const d = await api('/api/cluster/config');
             if (d.success) {
                 const c = d.config;
-                document.getElementById('cfg-code-path').value = c.code_path || '';
-                document.getElementById('cfg-data-path').value = c.data_path || '';
                 document.getElementById('cfg-mem-th').value = c.gpu_mem_threshold || '20';
                 document.getElementById('cfg-util-th').value = c.gpu_util_threshold || '15';
                 document.getElementById('cfg-reserved').value = c.reserved_gpu_count || '0';
@@ -337,8 +327,6 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    code_path: document.getElementById('cfg-code-path').value,
-                    data_path: document.getElementById('cfg-data-path').value,
                     gpu_mem_threshold: document.getElementById('cfg-mem-th').value,
                     gpu_util_threshold: document.getElementById('cfg-util-th').value,
                     reserved_gpu_count: document.getElementById('cfg-reserved').value

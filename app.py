@@ -52,17 +52,48 @@ def load_servers():
     """从数据库加载服务器列表"""
     return db.get_all_servers()
 
+
+def _ssh_connect_params(server):
+    """根据服务器配置返回 SSH 连接参数，支持密码或密钥"""
+    params = {
+        'hostname': server['ip'],
+        'port': server.get('port', 22),
+        'username': server['username'],
+        'timeout': 10,
+    }
+    auth_type = server.get('auth_type') or 'password'
+    key_path = (server.get('key_path') or '').strip()
+    if auth_type == 'key' and key_path:
+        path = os.path.expanduser(key_path)
+        if os.path.isfile(path):
+            passphrase = (server.get('key_passphrase') or '').strip() or None
+            for key_class in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey):
+                try:
+                    params['pkey'] = key_class.from_private_key_file(path, password=passphrase or '')
+                    params['look_for_keys'] = False
+                    return params
+                except (paramiko.ssh_exception.SSHException, paramiko.ssh_exception.PasswordRequiredException):
+                    continue
+            try:
+                params['pkey'] = paramiko.PKey.from_private_key_file(path, password=passphrase or '')
+                params['look_for_keys'] = False
+                return params
+            except paramiko.ssh_exception.PasswordRequiredException:
+                pass  # 需要密码但未提供，fallback 到 password
+            except Exception:
+                pass
+            params['key_filename'] = path
+            params['look_for_keys'] = False
+            return params
+    params['password'] = server.get('password', '')
+    return params
+
+
 def execute_ssh_command(server, command):
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=server['ip'],
-            port=server['port'],
-            username=server['username'],
-            password=server['password'],
-            timeout=10
-        )
+        ssh.connect(**_ssh_connect_params(server))
         
         #stdin, stdout, stderr = ssh.exec_command(command)
         full_command = f'source ~/.bashrc 2>/dev/null; source ~/.profile 2>/dev/null; {command}'
@@ -175,14 +206,9 @@ def execute_ssh_command_silent(server, command, timeout=60):
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=server['ip'],
-            port=server.get('port', 22),
-            username=server['username'],
-            password=server['password'],
-            timeout=10
-        )
-        full_cmd = f'source ~/.bashrc 2>/dev/null; source ~/.profile 2>/dev/null; cd {db.get_config(CONFIG_CODE_PATH, "/home")} 2>/dev/null; {command}'
+        ssh.connect(**_ssh_connect_params(server))
+        code_path = server.get('code_path') or db.get_config(CONFIG_CODE_PATH, '/home')
+        full_cmd = f'source ~/.bashrc 2>/dev/null; source ~/.profile 2>/dev/null; cd {code_path} 2>/dev/null; {command}'
         stdin, stdout, stderr = ssh.exec_command(full_cmd, timeout=timeout)
         out = stdout.read().decode('utf-8', errors='replace')
         err = stderr.read().decode('utf-8', errors='replace')
@@ -222,7 +248,7 @@ def find_available_port_on_server(server, base=18000):
 
 def run_training_on_server(task, server, gpu_ids):
     """在指定服务器上启动训练任务"""
-    code_path = db.get_config(CONFIG_CODE_PATH, '/home')
+    code_path = server.get('code_path') or db.get_config(CONFIG_CODE_PATH, '/home')
     script = task['script_path']
     args = task.get('script_args') or ''
     gpu_str = ','.join(map(str, gpu_ids))
@@ -241,7 +267,7 @@ def run_training_on_server(task, server, gpu_ids):
 
 def run_test_on_server(task, server, gpu_ids, port):
     """在指定服务器上启动测试任务（mock 或真机）"""
-    code_path = db.get_config(CONFIG_CODE_PATH, '/home')
+    code_path = server.get('code_path') or db.get_config(CONFIG_CODE_PATH, '/home')
     script = task.get('script_path') or ''
     args = task.get('script_args') or ''
     weight = task.get('weight_path') or ''
@@ -265,8 +291,10 @@ def cluster_task_scheduler():
     """后台调度：处理待执行的训练和测试任务"""
     while True:
         try:
-            code_path = db.get_config(CONFIG_CODE_PATH)
-            if not code_path:
+            # 至少有一台服务器配置了 code_path 才调度
+            servers = load_servers()
+            has_any_code_path = any(s.get('code_path') for s in servers) or db.get_config(CONFIG_CODE_PATH)
+            if not has_any_code_path:
                 time.sleep(15)
                 continue
             # 训练任务调度
@@ -431,13 +459,7 @@ def create_user_on_server(server, username, admin_password):
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=server['ip'],
-            port=server['port'],
-            username=server['username'],
-            password=server['password'],
-            timeout=10
-        )
+        ssh.connect(**_ssh_connect_params(server))
         
         # 创建用户命令序列
         commands = [
@@ -544,13 +566,7 @@ def get_users(server_name):
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=server['ip'],
-            port=server.get('port', 22),
-            username=server['username'],
-            password=server['password'],
-            timeout=10
-        )
+        ssh.connect(**_ssh_connect_params(server))
         
         # 获取用户列表（排除系统用户）
         stdin, stdout, stderr = ssh.exec_command("getent passwd | awk -F: '$3 >= 1000 && $3 != 65534 {print $1}' | sort")
@@ -614,13 +630,7 @@ def delete_user():
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=server['ip'],
-            port=server.get('port', 22),
-            username=server['username'],
-            password=server['password'],
-            timeout=10
-        )
+        ssh.connect(**_ssh_connect_params(server))
         
         # 先检查用户是否存在
         stdin, stdout, stderr = ssh.exec_command(f'id {username}')
@@ -646,13 +656,9 @@ def delete_user():
             try:
                 ssh2 = paramiko.SSHClient()
                 ssh2.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh2.connect(
-                    hostname=server['ip'],
-                    port=server.get('port', 22),
-                    username=server['username'],
-                    password=server['password'],
-                    timeout=5
-                )
+                params = _ssh_connect_params(server)
+                params['timeout'] = 5
+                ssh2.connect(**params)
                 
                 stdin, stdout, stderr = ssh2.exec_command(f'id {username}')
                 if stdout.read().decode('utf-8').strip() == '':
@@ -702,13 +708,7 @@ def manage_sudo():
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=server['ip'],
-            port=server.get('port', 22),
-            username=server['username'],
-            password=server['password'],
-            timeout=10
-        )
+        ssh.connect(**_ssh_connect_params(server))
         
         if action == 'grant':
             # 授予sudo权限：将用户添加到sudo组
@@ -755,10 +755,18 @@ def add_server():
     port = data.get('port', 22)
     description = data.get('description', '')
     dedicated_password = data.get('dedicated_password')
+    code_path = data.get('code_path', '')
+    data_path = data.get('data_path', '')
+    auth_type = data.get('auth_type', 'password')
+    key_path = data.get('key_path', '')
     
     # 验证必填字段
-    if not all([name, ip, username, password]):
-        return jsonify({'success': False, 'error': '所有字段都是必填的'})
+    if not all([name, ip, username]):
+        return jsonify({'success': False, 'error': '名称、IP、用户名必填'})
+    if auth_type == 'password' and not password:
+        return jsonify({'success': False, 'error': '密码认证时密码必填'})
+    if auth_type == 'key' and not key_path:
+        return jsonify({'success': False, 'error': '密钥认证时密钥路径必填'})
     
     # 验证IP地址格式
     ip_pattern = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
@@ -769,7 +777,7 @@ def add_server():
     if not isinstance(port, int) or port < 1 or port > 65535:
         return jsonify({'success': False, 'error': '端口号必须在1-65535之间'})
     
-    success, message = db.add_server(name, ip, port, username, password, description, dedicated_password)
+    success, message = db.add_server(name, ip, port, username, password or '', description, dedicated_password, code_path, data_path, auth_type, key_path)
     return jsonify({'success': success, 'message': message if success else message})
 
 @app.route('/api/admin/servers/<int:server_id>', methods=['PUT'])
@@ -798,7 +806,11 @@ def update_server(server_id):
         username=data.get('username'),
         password=data.get('password'),
         description=data.get('description'),
-        dedicated_password=data.get('dedicated_password')
+        dedicated_password=data.get('dedicated_password'),
+        code_path=data.get('code_path') if 'code_path' in data else None,
+        data_path=data.get('data_path') if 'data_path' in data else None,
+        auth_type=data.get('auth_type') if 'auth_type' in data else None,
+        key_path=data.get('key_path') if 'key_path' in data else None
     )
     
     return jsonify({'success': success, 'message': message})
@@ -823,13 +835,7 @@ def get_server_users(server_name):
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=server['ip'],
-            port=server.get('port', 22),
-            username=server['username'],
-            password=server['password'],
-            timeout=10
-        )
+        ssh.connect(**_ssh_connect_params(server))
         
         # 获取用户列表（排除系统用户）
         stdin, stdout, stderr = ssh.exec_command("getent passwd | awk -F: '$3 >= 1000 && $3 != 65534 {print $1}' | sort")
@@ -885,13 +891,7 @@ def delete_server_user(server_name, username):
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=server['ip'],
-            port=server.get('port', 22),
-            username=server['username'],
-            password=server['password'],
-            timeout=10
-        )
+        ssh.connect(**_ssh_connect_params(server))
         
         # 先检查用户是否存在
         stdin, stdout, stderr = ssh.exec_command(f'id {username}')
@@ -946,13 +946,7 @@ def manage_server_user_sudo(server_name, username):
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=server['ip'],
-            port=server.get('port', 22),
-            username=server['username'],
-            password=server['password'],
-            timeout=10
-        )
+        ssh.connect(**_ssh_connect_params(server))
         
         if action == 'grant':
             # 授予sudo权限：将用户添加到sudo组，同时设置密码为用户名
@@ -1168,7 +1162,7 @@ def _sftp_transfer(src_server, dst_server, remote_path):
         # 从 src 下载
         ssh_src = paramiko.SSHClient()
         ssh_src.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh_src.connect(src_server['ip'], src_server.get('port', 22), src_server['username'], src_server['password'])
+        ssh_src.connect(**_ssh_connect_params(src_server))
         sftp_src = ssh_src.open_sftp()
         sftp_src.get(remote_path, tmp_path)
         sftp_src.close()
@@ -1176,7 +1170,7 @@ def _sftp_transfer(src_server, dst_server, remote_path):
         # 上传到 dst
         ssh_dst = paramiko.SSHClient()
         ssh_dst.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh_dst.connect(dst_server['ip'], dst_server.get('port', 22), dst_server['username'], dst_server['password'])
+        ssh_dst.connect(**_ssh_connect_params(dst_server))
         sftp_dst = ssh_dst.open_sftp()
         try:
             sftp_dst.put(tmp_path, remote_path)
