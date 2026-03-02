@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, send_file, session, redirect, url_for
+from flask import Flask, render_template, jsonify, request, send_file, session, redirect, url_for, Response
 import json
 import paramiko
 import time
@@ -11,6 +11,7 @@ import hashlib
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import DatabaseManager
+from cluster_utils import parse_gpustat_output, find_idle_gpus, find_available_port, parse_used_ports
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
@@ -29,6 +30,13 @@ auth_codes = {}
 
 # 东八区时区
 CST = timezone(timedelta(hours=8))
+
+# 集群默认配置 key
+CONFIG_CODE_PATH = 'code_path'
+CONFIG_DATA_PATH = 'data_path'
+CONFIG_MEM_THRESHOLD = 'gpu_mem_threshold'
+CONFIG_UTIL_THRESHOLD = 'gpu_util_threshold'
+CONFIG_RESERVED_GPU = 'reserved_gpu_count'
 
 # 验证管理员权限的装饰器
 def require_admin(f):
@@ -56,7 +64,9 @@ def execute_ssh_command(server, command):
             timeout=10
         )
         
-        stdin, stdout, stderr = ssh.exec_command(command)
+        #stdin, stdout, stderr = ssh.exec_command(command)
+        full_command = f'source ~/.bashrc 2>/dev/null; source ~/.profile 2>/dev/null; {command}'
+        stdin, stdout, stderr = ssh.exec_command(full_command)
         output = stdout.read().decode('utf-8')
         error = stderr.read().decode('utf-8')
         
@@ -142,6 +152,14 @@ def update_all_servers():
                 try:
                     server_name, status = future.result()
                     server_status[server_name] = status
+                    # 内存报警：显存使用率>90%时记录
+                    try:
+                        gpus = parse_gpustat_output(status.get('gpu_status', ''))
+                        for g in gpus:
+                            if g.get('mem_percent', 0) > 90:
+                                db.add_memory_alert(server_name, 'gpu_memory', f"GPU {g['index']} 显存使用率 {g['mem_percent']}%")
+                    except Exception:
+                        pass
                 except Exception as e:
                     server = future_to_server[future]
                     print(f"更新服务器 {server['name']} 时发生错误: {str(e)}")
@@ -149,6 +167,133 @@ def update_all_servers():
             time.sleep(30)  # 每30秒更新一次
     finally:
         executor.shutdown(wait=True)
+
+
+# ========== 集群任务调度辅助 ==========
+def execute_ssh_command_silent(server, command, timeout=60):
+    """执行 SSH 命令，返回 (success, output)"""
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(
+            hostname=server['ip'],
+            port=server.get('port', 22),
+            username=server['username'],
+            password=server['password'],
+            timeout=10
+        )
+        full_cmd = f'source ~/.bashrc 2>/dev/null; source ~/.profile 2>/dev/null; cd {db.get_config(CONFIG_CODE_PATH, "/home")} 2>/dev/null; {command}'
+        stdin, stdout, stderr = ssh.exec_command(full_cmd, timeout=timeout)
+        out = stdout.read().decode('utf-8', errors='replace')
+        err = stderr.read().decode('utf-8', errors='replace')
+        ssh.close()
+        return True, out + (('\n' + err) if err else '')
+    except Exception as e:
+        return False, str(e)
+
+
+def get_used_ports_on_server(server):
+    """获取服务器上已占用的端口"""
+    ok, out = execute_ssh_command_silent(server, 'ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || netstat -an 2>/dev/null')
+    if not ok:
+        return set()
+    return parse_used_ports(out)
+
+
+def find_idle_server_and_gpus(gpu_count=1, reserved=0):
+    """在集群中找一台有空闲 GPU 的服务器，返回 (server, [gpu_ids]) 或 (None, [])"""
+    mem_th = int(db.get_config(CONFIG_MEM_THRESHOLD, 20))
+    util_th = int(db.get_config(CONFIG_UTIL_THRESHOLD, 15))
+    reserved = int(db.get_config(CONFIG_RESERVED_GPU, 0))
+    servers = load_servers()
+    for srv in servers:
+        st = server_status.get(srv['name'], {})
+        gpu_text = st.get('gpu_status', '')
+        idle = find_idle_gpus(gpu_text, mem_threshold=mem_th, util_threshold=util_th, reserved_gpu_count=reserved)
+        if len(idle) >= gpu_count:
+            return srv, idle[:gpu_count]
+    return None, []
+
+
+def find_available_port_on_server(server, base=18000):
+    used = get_used_ports_on_server(server)
+    return find_available_port(used, base_port=base)
+
+
+def run_training_on_server(task, server, gpu_ids):
+    """在指定服务器上启动训练任务"""
+    code_path = db.get_config(CONFIG_CODE_PATH, '/home')
+    script = task['script_path']
+    args = task.get('script_args') or ''
+    gpu_str = ','.join(map(str, gpu_ids))
+    log_path = f"/tmp/train_{task['id']}_{int(time.time())}.log"
+    cmd = f'CUDA_VISIBLE_DEVICES={gpu_str} nohup python {script} {args} > {log_path} 2>&1 & echo $!'
+    ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
+    if not ok:
+        return False, out
+    pid_match = re.search(r'(\d+)', out.strip().split('\n')[-1])
+    pid = int(pid_match.group(1)) if pid_match else None
+    db.update_training_task(task['id'], server_name=server['name'], gpu_ids=','.join(map(str, gpu_ids)),
+                            status='running', log_path=log_path, pid=pid,
+                            started_at=datetime.now(CST).isoformat())
+    return True, {'pid': pid, 'log_path': log_path}
+
+
+def run_test_on_server(task, server, gpu_ids, port):
+    """在指定服务器上启动测试任务（mock 或真机）"""
+    code_path = db.get_config(CONFIG_CODE_PATH, '/home')
+    script = task.get('script_path') or ''
+    args = task.get('script_args') or ''
+    weight = task.get('weight_path') or ''
+    gpu_str = ','.join(map(str, gpu_ids)) if gpu_ids else ''
+    env = f'CUDA_VISIBLE_DEVICES={gpu_str}' if gpu_str else ''
+    log_path = f"/tmp/test_{task['id']}_{int(time.time())}.log"
+    # 假设测试脚本接受 --port 和 --weight 等参数
+    extra = f'--port {port} --weight {weight}' if weight else f'--port {port}'
+    cmd = f'{env} nohup python {script} {args} {extra} > {log_path} 2>&1 & echo $!'
+    ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
+    if not ok:
+        return False, out
+    pid_match = re.search(r'(\d+)', out.strip().split('\n')[-1])
+    pid = int(pid_match.group(1)) if pid_match else None
+    db.update_test_task(task['id'], server_name=server['name'], gpu_ids=','.join(map(str, gpu_ids)) if gpu_ids else '',
+                        port=port, status='running', pid=pid, started_at=datetime.now(CST).isoformat())
+    return True, {'pid': pid, 'port': port, 'log_path': log_path}
+
+
+def cluster_task_scheduler():
+    """后台调度：处理待执行的训练和测试任务"""
+    while True:
+        try:
+            code_path = db.get_config(CONFIG_CODE_PATH)
+            if not code_path:
+                time.sleep(15)
+                continue
+            # 训练任务调度
+            for task in db.get_pending_training_tasks():
+                server, gpu_ids = find_idle_server_and_gpus(gpu_count=1, reserved=0)
+                if server and gpu_ids:
+                    ok, msg = run_training_on_server(task, server, gpu_ids)
+                    if not ok:
+                        db.update_training_task(task['id'], status='failed', error_message=str(msg))
+                    time.sleep(2)  # 避免连续提交过快
+            # 测试任务调度
+            for task in db.get_pending_test_tasks():
+                server, gpu_ids = find_idle_server_and_gpus(gpu_count=1, reserved=0)
+                if not server:
+                    server, gpu_ids = find_idle_server_and_gpus(gpu_count=0, reserved=0)
+                    gpu_ids = []
+                if server:
+                    port = find_available_port_on_server(server)
+                    if port:
+                        ok, msg = run_test_on_server(task, server, gpu_ids, port)
+                        if not ok:
+                            db.update_test_task(task['id'], status='failed', result=str(msg))
+                    time.sleep(2)
+        except Exception as e:
+            print(f"[Scheduler] Error: {e}")
+        time.sleep(10)
+
 
 @app.route('/')
 def index():
@@ -862,6 +1007,248 @@ def manage_server_user_sudo(server_name, username):
     except Exception as e:
         return jsonify({'success': False, 'error': f'连接服务器失败: {str(e)}'})
 
+# ========== 集群配置 API ==========
+@app.route('/api/cluster/config', methods=['GET'])
+@require_admin
+def get_cluster_config():
+    return jsonify({
+        'success': True,
+        'config': {
+            'code_path': db.get_config(CONFIG_CODE_PATH, ''),
+            'data_path': db.get_config(CONFIG_DATA_PATH, ''),
+            'gpu_mem_threshold': db.get_config(CONFIG_MEM_THRESHOLD, '20'),
+            'gpu_util_threshold': db.get_config(CONFIG_UTIL_THRESHOLD, '15'),
+            'reserved_gpu_count': db.get_config(CONFIG_RESERVED_GPU, '0'),
+        }
+    })
+
+
+@app.route('/api/cluster/config', methods=['POST'])
+@require_admin
+def set_cluster_config():
+    data = request.get_json() or {}
+    for k in [CONFIG_CODE_PATH, CONFIG_DATA_PATH, CONFIG_MEM_THRESHOLD, CONFIG_UTIL_THRESHOLD, CONFIG_RESERVED_GPU]:
+        if k in data:
+            db.set_config(k, str(data[k]))
+    return jsonify({'success': True})
+
+
+# ========== 训练任务 API ==========
+@app.route('/api/cluster/training/submit', methods=['POST'])
+@require_admin
+def submit_training_task():
+    data = request.get_json() or {}
+    name = data.get('name', '').strip()
+    script_path = data.get('script_path', '').strip()
+    script_args = data.get('script_args', '')
+    priority = int(data.get('priority', 5))
+    if not name or not script_path:
+        return jsonify({'success': False, 'error': '任务名和脚本路径必填'})
+    ok, result = db.add_training_task(name, script_path, script_args, priority)
+    if ok:
+        return jsonify({'success': True, 'task_id': result})
+    return jsonify({'success': False, 'error': str(result)})
+
+
+@app.route('/api/cluster/training/list')
+@require_admin
+def list_training_tasks():
+    limit = request.args.get('limit', 100, type=int)
+    tasks = db.get_all_training_tasks(limit=limit)
+    return jsonify({'success': True, 'tasks': tasks})
+
+
+@app.route('/api/cluster/training/<int:task_id>/log')
+@require_admin
+def get_training_log(task_id):
+    task = db.get_training_task(task_id)
+    if not task or not task.get('server_name') or not task.get('log_path'):
+        return jsonify({'success': False, 'error': '任务或日志不存在'})
+    server = db.get_server_by_name(task['server_name'])
+    if not server:
+        return jsonify({'success': False, 'error': '服务器不存在'})
+    ok, content = execute_ssh_command_silent(server, f'cat {task["log_path"]} 2>/dev/null || echo "(日志文件不存在)"')
+    if not ok:
+        return jsonify({'success': False, 'error': content})
+    return Response(content, mimetype='text/plain; charset=utf-8')
+
+
+@app.route('/api/cluster/training/<int:task_id>/kill', methods=['POST'])
+@require_admin
+def kill_training_task(task_id):
+    task = db.get_training_task(task_id)
+    if not task or task.get('status') != 'running':
+        return jsonify({'success': False, 'error': '任务未在运行'})
+    server = db.get_server_by_name(task['server_name'])
+    if not server:
+        return jsonify({'success': False, 'error': '服务器不存在'})
+    pid = task.get('pid')
+    if not pid:
+        return jsonify({'success': False, 'error': '无 PID'})
+    ok, out = execute_ssh_command_silent(server, f'kill -9 {pid} 2>/dev/null; echo done')
+    db.update_training_task(task_id, status='killed', finished_at=datetime.now(CST).isoformat())
+    return jsonify({'success': True})
+
+
+@app.route('/api/cluster/training/<int:task_id>/weight', methods=['POST'])
+@require_admin
+def record_training_weight(task_id):
+    data = request.get_json() or {}
+    path = data.get('path', '').strip()
+    if not path:
+        return jsonify({'success': False, 'error': '权重路径必填'})
+    task = db.get_training_task(task_id)
+    if not task:
+        return jsonify({'success': False, 'error': '任务不存在'})
+    db.update_training_task(task_id, weight_path=path)
+    db.add_model_weight(task.get('name', 'task') + '_' + str(task_id), path, task.get('server_name', ''), task_id)
+    return jsonify({'success': True})
+
+
+# ========== 测试任务 API ==========
+@app.route('/api/cluster/test/submit', methods=['POST'])
+@require_admin
+def submit_test_task():
+    data = request.get_json() or {}
+    name = data.get('name', '').strip()
+    task_type = data.get('task_type', 'mock')  # mock 或 real
+    weight_path = data.get('weight_path', '')
+    script_path = data.get('script_path', '')
+    script_args = data.get('script_args', '')
+    training_task_id = data.get('training_task_id')
+    if not name:
+        return jsonify({'success': False, 'error': '任务名必填'})
+    if task_type not in ('mock', 'real'):
+        return jsonify({'success': False, 'error': 'task_type 须为 mock 或 real'})
+    ok, result = db.add_test_task(name, task_type, weight_path, script_path, script_args, training_task_id)
+    if ok:
+        return jsonify({'success': True, 'task_id': result})
+    return jsonify({'success': False, 'error': str(result)})
+
+
+@app.route('/api/cluster/test/list')
+@require_admin
+def list_test_tasks():
+    limit = request.args.get('limit', 100, type=int)
+    tasks = db.get_all_test_tasks(limit=limit)
+    return jsonify({'success': True, 'tasks': tasks})
+
+
+@app.route('/api/cluster/test/<int:task_id>/kill', methods=['POST'])
+@require_admin
+def kill_test_task(task_id):
+    task = db.get_test_task(task_id)
+    if not task or task.get('status') != 'running':
+        return jsonify({'success': False, 'error': '任务未在运行'})
+    server = db.get_server_by_name(task['server_name'])
+    if not server:
+        return jsonify({'success': False, 'error': '服务器不存在'})
+    pid = task.get('pid')
+    if not pid:
+        return jsonify({'success': False, 'error': '无 PID'})
+    ok, out = execute_ssh_command_silent(server, f'kill -9 {pid} 2>/dev/null; echo done')
+    db.update_test_task(task_id, status='killed', finished_at=datetime.now(CST).isoformat())
+    return jsonify({'success': True})
+
+
+# ========== 模型权重 API ==========
+@app.route('/api/cluster/weights')
+@require_admin
+def list_model_weights():
+    weights = db.get_all_model_weights()
+    return jsonify({'success': True, 'weights': weights})
+
+
+def _sftp_transfer(src_server, dst_server, remote_path):
+    """通过管理节点中转：从 src 下载到临时文件，再上传到 dst"""
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix='.transfer')
+        os.close(fd)
+        # 从 src 下载
+        ssh_src = paramiko.SSHClient()
+        ssh_src.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh_src.connect(src_server['ip'], src_server.get('port', 22), src_server['username'], src_server['password'])
+        sftp_src = ssh_src.open_sftp()
+        sftp_src.get(remote_path, tmp_path)
+        sftp_src.close()
+        ssh_src.close()
+        # 上传到 dst
+        ssh_dst = paramiko.SSHClient()
+        ssh_dst.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh_dst.connect(dst_server['ip'], dst_server.get('port', 22), dst_server['username'], dst_server['password'])
+        sftp_dst = ssh_dst.open_sftp()
+        try:
+            sftp_dst.put(tmp_path, remote_path)
+        finally:
+            sftp_dst.close()
+            ssh_dst.close()
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        return True, None
+    except Exception as e:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+        return False, str(e)
+
+
+@app.route('/api/cluster/weights/transfer', methods=['POST'])
+@require_admin
+def transfer_weight():
+    data = request.get_json() or {}
+    src_server = data.get('src_server')
+    dst_server = data.get('dst_server')
+    path = data.get('path', '').strip()
+    if not all([src_server, dst_server, path]):
+        return jsonify({'success': False, 'error': 'src_server, dst_server, path 必填'})
+    srv_src = db.get_server_by_name(src_server)
+    srv_dst = db.get_server_by_name(dst_server)
+    if not srv_src or not srv_dst:
+        return jsonify({'success': False, 'error': '服务器不存在'})
+    ok, err = _sftp_transfer(srv_src, srv_dst, path)
+    if ok:
+        return jsonify({'success': True})
+    return jsonify({'success': False, 'error': err})
+
+
+# ========== 内存报警 API ==========
+@app.route('/api/cluster/alerts')
+@require_admin
+def list_alerts():
+    alerts = db.get_recent_alerts()
+    return jsonify({'success': True, 'alerts': alerts})
+
+
+@app.route('/api/cluster/servers/idle-gpus')
+@require_admin
+def get_idle_gpus():
+    """获取各服务器空闲 GPU 信息"""
+    mem_th = int(db.get_config(CONFIG_MEM_THRESHOLD, 20))
+    util_th = int(db.get_config(CONFIG_UTIL_THRESHOLD, 15))
+    result = []
+    for srv_name, st in server_status.items():
+        gpus = parse_gpustat_output(st.get('gpu_status', ''))
+        idle = find_idle_gpus(st.get('gpu_status', ''), mem_th, util_th)
+        result.append({
+            'server': srv_name,
+            'idle_gpus': idle,
+            'total_gpus': len(gpus),
+            'gpus': gpus
+        })
+    return jsonify({'success': True, 'servers': result})
+
+
+# ========== 集群管理页面 ==========
+@app.route('/cluster')
+def cluster_dashboard():
+    if not session.get('admin_logged_in'):
+        return redirect(url_for('admin_login'))
+    return render_template('cluster.html')
+
+
 @app.route('/api/download-key/<server_name>/<username>')
 def download_key(server_name, username):
     key_id = f"{server_name}_{username}"
@@ -900,5 +1287,7 @@ if __name__ == '__main__':
     # 启动后台线程进行定期更新
     update_thread = threading.Thread(target=update_all_servers, daemon=True)
     update_thread.start()
-    
+    # 启动集群任务调度器
+    scheduler_thread = threading.Thread(target=cluster_task_scheduler, daemon=True)
+    scheduler_thread.start()
     app.run(host='0.0.0.0', port=5000, debug=True) 

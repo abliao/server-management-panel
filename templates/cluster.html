@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>集群管理 - 训练与测试调度</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Noto Sans SC', -apple-system, sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            min-height: 100vh;
+        }
+        .nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            padding: 12px 24px;
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            z-index: 100;
+        }
+        .nav a {
+            color: #58a6ff;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        .nav a:hover { color: #79c0ff; }
+        .nav .active { color: #7ee787; }
+        .main {
+            margin-top: 60px;
+            padding: 24px;
+            max-width: 1400px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .section {
+            background: #161b22;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid #30363d;
+        }
+        .section h2 {
+            color: #7ee787;
+            font-size: 1.2rem;
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #30363d;
+        }
+        .form-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            margin-bottom: 12px;
+        }
+        .form-group { flex: 1; min-width: 180px; }
+        .form-group label { display: block; margin-bottom: 4px; font-size: 0.85rem; color: #8b949e; }
+        .form-group input, .form-group select, .form-group textarea {
+            width: 100%;
+            padding: 8px 12px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #e6edf3;
+            font-family: inherit;
+        }
+        .btn {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+        .btn-primary { background: #238636; color: #fff; }
+        .btn-primary:hover { background: #2ea043; }
+        .btn-danger { background: #da3633; color: #fff; }
+        .btn-danger:hover { background: #f85149; }
+        .btn-secondary { background: #21262d; color: #e6edf3; border: 1px solid #30363d; }
+        .btn-secondary:hover { background: #30363d; }
+        .table-wrap { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #30363d; }
+        th { color: #8b949e; font-weight: 500; }
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+        }
+        .badge-pending { background: #387604; color: #7ee787; }
+        .badge-running { background: #1f6feb; color: #fff; }
+        .badge-done { background: #238636; color: #7ee787; }
+        .badge-failed { background: #da3633; color: #ff7b72; }
+        .badge-killed { background: #6e7681; color: #8b949e; }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.7);
+            z-index: 200;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .modal.show { display: flex; }
+        .modal-content {
+            background: #161b22;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 800px;
+            width: 100%;
+            max-height: 85vh;
+            overflow: auto;
+            border: 1px solid #30363d;
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        .modal-header h3 { color: #7ee787; }
+        .modal-close { background: none; border: none; color: #8b949e; font-size: 1.5rem; cursor: pointer; }
+        .log-viewer {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            max-height: 400px;
+            overflow: auto;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <nav class="nav">
+        <a href="/"><i class="fas fa-chart-bar"></i> 监控面板</a>
+        <a href="/admin"><i class="fas fa-cogs"></i> 管理面板</a>
+        <a href="/cluster" class="active"><i class="fas fa-layer-group"></i> 集群管理</a>
+        <a href="#" onclick="event.preventDefault();fetch('/api/admin/logout',{method:'POST'}).then(()=>location.href='/admin/login');" style="margin-left:auto;"><i class="fas fa-sign-out-alt"></i> 退出</a>
+    </nav>
+
+    <main class="main">
+        <div id="msg" class="section" style="display:none; margin-bottom:12px;"></div>
+
+        <!-- 全局配置 -->
+        <div class="section">
+            <h2><i class="fas fa-sliders-h"></i> 集群配置</h2>
+            <p style="color:#8b949e;font-size:0.85rem;margin-bottom:12px;">代码和数据路径需在所有服务器上一致，以实现集群效果</p>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>代码路径</label>
+                    <input type="text" id="cfg-code-path" placeholder="/home/project">
+                </div>
+                <div class="form-group">
+                    <label>数据路径</label>
+                    <input type="text" id="cfg-data-path" placeholder="/data">
+                </div>
+                <div class="form-group">
+                    <label>空闲GPU显存阈值(%)</label>
+                    <input type="number" id="cfg-mem-th" value="20" min="0" max="100">
+                </div>
+                <div class="form-group">
+                    <label>空闲GPU算力阈值(%)</label>
+                    <input type="number" id="cfg-util-th" value="15" min="0" max="100">
+                </div>
+                <div class="form-group">
+                    <label>每机保留卡数(模型调度冗余)</label>
+                    <input type="number" id="cfg-reserved" value="0" min="0">
+                </div>
+                <div class="form-group" style="display:flex;align-items:flex-end;">
+                    <button class="btn btn-primary" onclick="saveConfig()">保存配置</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 空闲GPU概览 -->
+        <div class="section">
+            <h2><i class="fas fa-microchip"></i> 空闲 GPU 概览</h2>
+            <div id="idle-gpus"></div>
+        </div>
+
+        <!-- 训练任务 -->
+        <div class="section">
+            <h2><i class="fas fa-brain"></i> 训练任务</h2>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>任务名</label>
+                    <input type="text" id="train-name" placeholder="exp_001">
+                </div>
+                <div class="form-group">
+                    <label>脚本路径(相对代码目录)</label>
+                    <input type="text" id="train-script" placeholder="train.py">
+                </div>
+                <div class="form-group">
+                    <label>脚本参数</label>
+                    <input type="text" id="train-args" placeholder="--epochs 10">
+                </div>
+                <div class="form-group">
+                    <label>优先级(1-10)</label>
+                    <input type="number" id="train-priority" value="5" min="1" max="10">
+                </div>
+                <div class="form-group" style="display:flex;align-items:flex-end;">
+                    <button class="btn btn-primary" onclick="submitTraining()">提交训练</button>
+                </div>
+            </div>
+            <div class="table-wrap" style="margin-top:16px;">
+                <table>
+                    <thead>
+                        <tr><th>ID</th><th>任务名</th><th>脚本</th><th>服务器</th><th>GPU</th><th>状态</th><th>操作</th></tr>
+                    </thead>
+                    <tbody id="train-list"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 测试任务 -->
+        <div class="section">
+            <h2><i class="fas fa-vial"></i> 测试任务</h2>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>任务名</label>
+                    <input type="text" id="test-name" placeholder="test_mock_001">
+                </div>
+                <div class="form-group">
+                    <label>类型</label>
+                    <select id="test-type"><option value="mock">Mock</option><option value="real">真机</option></select>
+                </div>
+                <div class="form-group">
+                    <label>权重路径</label>
+                    <input type="text" id="test-weight" placeholder="/path/to/weights">
+                </div>
+                <div class="form-group">
+                    <label>脚本路径</label>
+                    <input type="text" id="test-script" placeholder="eval.py">
+                </div>
+                <div class="form-group">
+                    <label>脚本参数</label>
+                    <input type="text" id="test-args" placeholder="">
+                </div>
+                <div class="form-group" style="display:flex;align-items:flex-end;">
+                    <button class="btn btn-primary" onclick="submitTest()">提交测试</button>
+                </div>
+            </div>
+            <div class="table-wrap" style="margin-top:16px;">
+                <table>
+                    <thead>
+                        <tr><th>ID</th><th>任务名</th><th>类型</th><th>服务器</th><th>端口</th><th>状态</th><th>操作</th></tr>
+                    </thead>
+                    <tbody id="test-list"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 模型权重 -->
+        <div class="section">
+            <h2><i class="fas fa-database"></i> 模型权重</h2>
+            <div class="form-row" style="margin-bottom:16px;">
+                <div class="form-group"><label>源服务器</label><input type="text" id="xfer-src" placeholder="server1"></div>
+                <div class="form-group"><label>目标服务器</label><input type="text" id="xfer-dst" placeholder="server2"></div>
+                <div class="form-group"><label>权重路径</label><input type="text" id="xfer-path" placeholder="/path/to/weights"></div>
+                <div class="form-group" style="display:flex;align-items:flex-end;"><button class="btn btn-primary" onclick="transferWeight()">远程传输</button></div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr><th>名称</th><th>路径</th><th>服务器</th><th>训练ID</th></tr>
+                    </thead>
+                    <tbody id="weight-list"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 内存报警 -->
+        <div class="section">
+            <h2><i class="fas fa-exclamation-triangle"></i> 报警记录</h2>
+            <div id="alert-list"></div>
+        </div>
+    </main>
+
+    <!-- 日志弹窗 -->
+    <div id="log-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>训练日志</h3>
+                <button class="modal-close" onclick="closeLogModal()">&times;</button>
+            </div>
+            <div id="log-content" class="log-viewer">加载中...</div>
+        </div>
+    </div>
+
+    <script>
+        function showMsg(type, text) {
+            const el = document.getElementById('msg');
+            el.style.display = 'block';
+            el.className = 'section ' + (type === 'ok' ? '' : '');
+            el.style.background = type === 'ok' ? '#23863622' : '#da363322';
+            el.style.borderColor = type === 'ok' ? '#238636' : '#da3633';
+            el.textContent = text;
+            setTimeout(() => { el.style.display = 'none'; }, 4000);
+        }
+
+        async function api(path, opts = {}) {
+            const r = await fetch(path, opts);
+            return r.json();
+        }
+
+        async function loadConfig() {
+            const d = await api('/api/cluster/config');
+            if (d.success) {
+                const c = d.config;
+                document.getElementById('cfg-code-path').value = c.code_path || '';
+                document.getElementById('cfg-data-path').value = c.data_path || '';
+                document.getElementById('cfg-mem-th').value = c.gpu_mem_threshold || '20';
+                document.getElementById('cfg-util-th').value = c.gpu_util_threshold || '15';
+                document.getElementById('cfg-reserved').value = c.reserved_gpu_count || '0';
+            }
+        }
+
+        async function saveConfig() {
+            const d = await api('/api/cluster/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    code_path: document.getElementById('cfg-code-path').value,
+                    data_path: document.getElementById('cfg-data-path').value,
+                    gpu_mem_threshold: document.getElementById('cfg-mem-th').value,
+                    gpu_util_threshold: document.getElementById('cfg-util-th').value,
+                    reserved_gpu_count: document.getElementById('cfg-reserved').value
+                })
+            });
+            if (d.success) showMsg('ok', '配置已保存');
+            else showMsg('err', d.error);
+        }
+
+        async function loadIdleGpus() {
+            const d = await api('/api/cluster/servers/idle-gpus');
+            const el = document.getElementById('idle-gpus');
+            if (!d.success) { el.innerHTML = '加载失败'; return; }
+            el.innerHTML = d.servers.map(s => 
+                `<div style="margin-bottom:8px;"><strong>${s.server}</strong>: 空闲GPU [${s.idle_gpus.join(',') || '无'}] / 总${s.total_gpus}卡</div>`
+            ).join('') || '暂无服务器';
+        }
+
+        async function loadTraining() {
+            const d = await api('/api/cluster/training/list');
+            const tbody = document.getElementById('train-list');
+            if (!d.success) { tbody.innerHTML = '<tr><td colspan="7">加载失败</td></tr>'; return; }
+            const statusClass = { pending: 'badge-pending', running: 'badge-running', done: 'badge-done', failed: 'badge-failed', killed: 'badge-killed' };
+            tbody.innerHTML = d.tasks.map(t => `
+                <tr>
+                    <td>${t.id}</td>
+                    <td>${t.name}</td>
+                    <td>${t.script_path}</td>
+                    <td>${t.server_name || '-'}</td>
+                    <td>${t.gpu_ids || '-'}</td>
+                    <td><span class="badge ${statusClass[t.status] || 'badge-pending'}">${t.status}</span></td>
+                    <td>
+                        ${t.log_path ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="viewLog(${t.id})">日志</button>` : ''}
+                        ${t.status === 'running' ? `<button class="btn btn-danger" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="killTrain(${t.id})">停止</button>` : ''}
+                        ${(t.status === 'done' || t.status === 'running') && !t.weight_path ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="recordWeight(${t.id},'${(t.name||'').replace(/'/g,"\\'")}')">记录权重</button>` : ''}
+                    </td>
+                </tr>
+            `).join('') || '<tr><td colspan="7">暂无训练任务</td></tr>';
+        }
+
+        async function submitTraining() {
+            const name = document.getElementById('train-name').value.trim();
+            const script = document.getElementById('train-script').value.trim();
+            const args = document.getElementById('train-args').value.trim();
+            const priority = document.getElementById('train-priority').value;
+            if (!name || !script) { showMsg('err', '任务名和脚本路径必填'); return; }
+            const d = await api('/api/cluster/training/submit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, script_path: script, script_args: args, priority: parseInt(priority) })
+            });
+            if (d.success) { showMsg('ok', '训练任务已提交，等待调度'); loadTraining(); }
+            else showMsg('err', d.error);
+        }
+
+        async function viewLog(id) {
+            document.getElementById('log-modal').classList.add('show');
+            document.getElementById('log-content').textContent = '加载中...';
+            const r = await fetch('/api/cluster/training/' + id + '/log');
+            const text = await r.text();
+            document.getElementById('log-content').textContent = text || '(空)';
+        }
+
+        function closeLogModal() {
+            document.getElementById('log-modal').classList.remove('show');
+        }
+
+        async function killTrain(id) {
+            if (!confirm('确定停止该训练任务？')) return;
+            const d = await api('/api/cluster/training/' + id + '/kill', { method: 'POST' });
+            if (d.success) { showMsg('ok', '已停止'); loadTraining(); }
+            else showMsg('err', d.error);
+        }
+
+        async function recordWeight(id, name) {
+            const path = prompt('请输入权重保存路径（在对应服务器上的绝对路径）：', '/path/to/checkpoint/best.pt');
+            if (!path) return;
+            const d = await api('/api/cluster/training/' + id + '/weight', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path.trim() })
+            });
+            if (d.success) { showMsg('ok', '权重已记录'); loadTraining(); loadWeights(); }
+            else showMsg('err', d.error);
+        }
+
+        async function loadTest() {
+            const d = await api('/api/cluster/test/list');
+            const tbody = document.getElementById('test-list');
+            if (!d.success) { tbody.innerHTML = '<tr><td colspan="7">加载失败</td></tr>'; return; }
+            const statusClass = { pending: 'badge-pending', running: 'badge-running', done: 'badge-done', failed: 'badge-failed', killed: 'badge-killed' };
+            tbody.innerHTML = d.tasks.map(t => `
+                <tr>
+                    <td>${t.id}</td>
+                    <td>${t.name}</td>
+                    <td>${t.task_type}</td>
+                    <td>${t.server_name || '-'}</td>
+                    <td>${t.port || '-'}</td>
+                    <td><span class="badge ${statusClass[t.status] || 'badge-pending'}">${t.status}</span></td>
+                    <td>
+                        ${t.status === 'running' ? `<button class="btn btn-danger" style="padding:4px 8px;font-size:0.8rem;" onclick="killTest(${t.id})">停止</button>` : ''}
+                    </td>
+                </tr>
+            `).join('') || '<tr><td colspan="7">暂无测试任务</td></tr>';
+        }
+
+        async function submitTest() {
+            const name = document.getElementById('test-name').value.trim();
+            const type = document.getElementById('test-type').value;
+            const weight = document.getElementById('test-weight').value.trim();
+            const script = document.getElementById('test-script').value.trim();
+            const args = document.getElementById('test-args').value.trim();
+            if (!name) { showMsg('err', '任务名必填'); return; }
+            const d = await api('/api/cluster/test/submit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, task_type: type, weight_path: weight, script_path: script, script_args: args })
+            });
+            if (d.success) { showMsg('ok', '测试任务已提交'); loadTest(); }
+            else showMsg('err', d.error);
+        }
+
+        async function killTest(id) {
+            if (!confirm('确定停止该测试任务？')) return;
+            const d = await api('/api/cluster/test/' + id + '/kill', { method: 'POST' });
+            if (d.success) { showMsg('ok', '已停止'); loadTest(); }
+            else showMsg('err', d.error);
+        }
+
+        async function loadWeights() {
+            const d = await api('/api/cluster/weights');
+            const tbody = document.getElementById('weight-list');
+            if (!d.success) { tbody.innerHTML = '<tr><td colspan="4">加载失败</td></tr>'; return; }
+            tbody.innerHTML = d.weights.map(w => `
+                <tr><td>${w.name}</td><td><code>${w.path}</code></td><td>${w.server_name}</td><td>${w.training_task_id || '-'}</td></tr>
+            `).join('') || '<tr><td colspan="4">暂无权重记录</td></tr>';
+        }
+
+        async function transferWeight() {
+            const src = document.getElementById('xfer-src').value.trim();
+            const dst = document.getElementById('xfer-dst').value.trim();
+            const path = document.getElementById('xfer-path').value.trim();
+            if (!src || !dst || !path) { showMsg('err', '请填写源服务器、目标服务器和路径'); return; }
+            const d = await api('/api/cluster/weights/transfer', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ src_server: src, dst_server: dst, path })
+            });
+            if (d.success) showMsg('ok', '传输任务已提交');
+            else showMsg('err', d.error);
+        }
+
+        async function loadAlerts() {
+            const d = await api('/api/cluster/alerts');
+            const el = document.getElementById('alert-list');
+            if (!d.success) { el.innerHTML = '加载失败'; return; }
+            el.innerHTML = d.alerts.length ? d.alerts.map(a => 
+                `<div style="padding:8px;background:#21262d;border-radius:6px;margin-bottom:8px;">${a.server_name} - ${a.alert_type}: ${a.message}</div>`
+            ).join('') : '<p style="color:#8b949e;">暂无报警</p>';
+        }
+
+        function refresh() {
+            loadConfig();
+            loadIdleGpus();
+            loadTraining();
+            loadTest();
+            loadWeights();
+            loadAlerts();
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            refresh();
+            setInterval(refresh, 15000);
+        });
+    </script>
+</body>
+</html>

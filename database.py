@@ -75,6 +75,86 @@ class DatabaseManager:
                 )
             ''')
             
+            # 全局配置表（代码路径、数据路径、空闲GPU阈值等）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS cluster_config (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    config_key TEXT UNIQUE NOT NULL,
+                    config_value TEXT NOT NULL,
+                    description TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # 训练任务表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS training_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    script_path TEXT NOT NULL,
+                    script_args TEXT,
+                    server_name TEXT,
+                    gpu_ids TEXT,
+                    priority INTEGER DEFAULT 5,
+                    status TEXT DEFAULT 'pending',
+                    log_path TEXT,
+                    weight_path TEXT,
+                    pid INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    started_at TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    error_message TEXT
+                )
+            ''')
+            
+            # 测试任务表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS test_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    task_type TEXT NOT NULL,
+                    server_name TEXT,
+                    port INTEGER,
+                    gpu_ids TEXT,
+                    weight_path TEXT,
+                    script_path TEXT,
+                    script_args TEXT,
+                    training_task_id INTEGER,
+                    status TEXT DEFAULT 'pending',
+                    pid INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    started_at TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    result TEXT,
+                    FOREIGN KEY (training_task_id) REFERENCES training_tasks(id)
+                )
+            ''')
+            
+            # 模型权重记录表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS model_weights (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    server_name TEXT NOT NULL,
+                    training_task_id INTEGER,
+                    size_mb REAL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (training_task_id) REFERENCES training_tasks(id)
+                )
+            ''')
+            
+            # 内存报警记录表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS memory_alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_name TEXT NOT NULL,
+                    alert_type TEXT NOT NULL,
+                    message TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
             conn.commit()
     
     def add_server(self, name, ip, port, username, password, description='', dedicated_password=None):
@@ -326,3 +406,216 @@ class DatabaseManager:
         
         except Exception as e:
             return False, f"更新密码失败: {str(e)}"
+    
+    # ========== 集群配置 ==========
+    def get_config(self, key, default=None):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT config_value FROM cluster_config WHERE config_key = ?', (key,))
+                row = cursor.fetchone()
+                return row[0] if row else default
+        except Exception:
+            return default
+    
+    def set_config(self, key, value, description=''):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO cluster_config (config_key, config_value, description, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(config_key) DO UPDATE SET config_value=?, description=?, updated_at=CURRENT_TIMESTAMP
+                ''', (key, str(value), description, str(value), description))
+                conn.commit()
+                return True
+        except Exception as e:
+            print(f"设置配置失败: {e}")
+            return False
+    
+    # ========== 训练任务 ==========
+    def add_training_task(self, name, script_path, script_args='', priority=5):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO training_tasks (name, script_path, script_args, priority, status)
+                    VALUES (?, ?, ?, ?, 'pending')
+                ''', (name, script_path, script_args, priority))
+                conn.commit()
+                return True, cursor.lastrowid
+        except Exception as e:
+            return False, str(e)
+    
+    def update_training_task(self, task_id, **kwargs):
+        try:
+            allowed = {'server_name', 'gpu_ids', 'status', 'log_path', 'weight_path', 'pid', 'started_at', 'finished_at', 'error_message'}
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                updates = []
+                values = []
+                for k, v in kwargs.items():
+                    if k in allowed:
+                        updates.append(f'{k}=?')
+                        values.append(v)
+                if not updates:
+                    return False
+                values.append(task_id)
+                cursor.execute(f'UPDATE training_tasks SET {", ".join(updates)} WHERE id=?', values)
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception:
+            return False
+    
+    def get_pending_training_tasks(self):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM training_tasks WHERE status="pending" ORDER BY priority DESC, created_at ASC')
+                return [self._row_to_training_task(row) for row in cursor.fetchall()]
+        except Exception:
+            return []
+    
+    def get_training_task(self, task_id):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM training_tasks WHERE id=?', (task_id,))
+                row = cursor.fetchone()
+                return self._row_to_training_task(row) if row else None
+        except Exception:
+            return None
+    
+    def get_all_training_tasks(self, limit=100):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM training_tasks ORDER BY id DESC LIMIT ?', (limit,))
+                return [self._row_to_training_task(row) for row in cursor.fetchall()]
+        except Exception:
+            return []
+    
+    def _row_to_training_task(self, row):
+        return {
+            'id': row[0], 'name': row[1], 'script_path': row[2], 'script_args': row[3] or '',
+            'server_name': row[4], 'gpu_ids': row[5], 'priority': row[6], 'status': row[7],
+            'log_path': row[8], 'weight_path': row[9], 'pid': row[10],
+            'created_at': row[11], 'started_at': row[12], 'finished_at': row[13], 'error_message': row[14]
+        }
+    
+    # ========== 测试任务 ==========
+    def add_test_task(self, name, task_type, weight_path='', script_path='', script_args='', training_task_id=None):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO test_tasks (name, task_type, weight_path, script_path, script_args, training_task_id, status)
+                    VALUES (?, ?, ?, ?, ?, ?, 'pending')
+                ''', (name, task_type, weight_path, script_path, script_args, training_task_id))
+                conn.commit()
+                return True, cursor.lastrowid
+        except Exception as e:
+            return False, str(e)
+    
+    def update_test_task(self, task_id, **kwargs):
+        try:
+            allowed = {'server_name', 'port', 'gpu_ids', 'status', 'pid', 'started_at', 'finished_at', 'result'}
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                updates = []
+                values = []
+                for k, v in kwargs.items():
+                    if k in allowed:
+                        updates.append(f'{k}=?')
+                        values.append(v)
+                if not updates:
+                    return False
+                values.append(task_id)
+                cursor.execute(f'UPDATE test_tasks SET {", ".join(updates)} WHERE id=?', values)
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception:
+            return False
+    
+    def get_test_task(self, task_id):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM test_tasks WHERE id=?', (task_id,))
+                row = cursor.fetchone()
+                return self._row_to_test_task(row) if row else None
+        except Exception:
+            return None
+    
+    def get_all_test_tasks(self, limit=100):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM test_tasks ORDER BY id DESC LIMIT ?', (limit,))
+                return [self._row_to_test_task(row) for row in cursor.fetchall()]
+        except Exception:
+            return []
+    
+    def get_pending_test_tasks(self):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM test_tasks WHERE status="pending" ORDER BY created_at ASC')
+                return [self._row_to_test_task(row) for row in cursor.fetchall()]
+        except Exception:
+            return []
+    
+    def _row_to_test_task(self, row):
+        return {
+            'id': row[0], 'name': row[1], 'task_type': row[2], 'server_name': row[3], 'port': row[4],
+            'gpu_ids': row[5], 'weight_path': row[6], 'script_path': row[7], 'script_args': row[8],
+            'training_task_id': row[9], 'status': row[10], 'pid': row[11],
+            'created_at': row[12], 'started_at': row[13], 'finished_at': row[14], 'result': row[15]
+        }
+    
+    # ========== 模型权重 ==========
+    def add_model_weight(self, name, path, server_name, training_task_id=None, size_mb=None):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO model_weights (name, path, server_name, training_task_id, size_mb)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (name, path, server_name, training_task_id, size_mb))
+                conn.commit()
+                return True, cursor.lastrowid
+        except Exception as e:
+            return False, str(e)
+    
+    def get_all_model_weights(self, limit=200):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM model_weights ORDER BY created_at DESC LIMIT ?', (limit,))
+                rows = cursor.fetchall()
+                return [{'id': r[0], 'name': r[1], 'path': r[2], 'server_name': r[3],
+                         'training_task_id': r[4], 'size_mb': r[5], 'created_at': r[6]} for r in rows]
+        except Exception:
+            return []
+    
+    # ========== 内存报警 ==========
+    def add_memory_alert(self, server_name, alert_type, message):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('INSERT INTO memory_alerts (server_name, alert_type, message) VALUES (?, ?, ?)',
+                               (server_name, alert_type, message))
+                conn.commit()
+                return True
+        except Exception:
+            return False
+    
+    def get_recent_alerts(self, limit=50):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM memory_alerts ORDER BY created_at DESC LIMIT ?', (limit,))
+                rows = cursor.fetchall()
+                return [{'id': r[0], 'server_name': r[1], 'alert_type': r[2], 'message': r[3], 'created_at': r[4]} for r in rows]
+        except Exception:
+            return []
