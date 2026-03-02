@@ -145,6 +145,69 @@
             overflow: auto;
             white-space: pre-wrap;
         }
+
+        /* 空闲 GPU 概览 */
+        .idle-gpu-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 16px;
+        }
+        .idle-gpu-card {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 10px;
+            padding: 16px;
+            transition: border-color 0.2s;
+        }
+        .idle-gpu-card:hover { border-color: #484f58; }
+        .idle-gpu-card.error { border-color: #da3633; background: #da363311; }
+        .idle-gpu-card .server-name {
+            font-weight: 600;
+            font-size: 1rem;
+            color: #e6edf3;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .idle-gpu-card .server-name i { color: #7ee787; font-size: 0.9rem; }
+        .idle-gpu-card .gpu-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 0;
+            font-size: 0.9rem;
+        }
+        .idle-gpu-card .gpu-row + .gpu-row { border-top: 1px solid #21262d; }
+        .idle-gpu-card .gpu-label {
+            color: #8b949e;
+            min-width: 56px;
+            font-size: 0.8rem;
+        }
+        .idle-gpu-card .gpu-value {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .idle-gpu-card .gpu-chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+        }
+        .idle-gpu-card .gpu-chip.has-idle { background: #23863633; color: #7ee787; }
+        .idle-gpu-card .gpu-chip.empty { background: #21262d; color: #6e7681; }
+        .idle-gpu-card .gpu-total {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #30363d;
+            font-size: 0.85rem;
+            color: #8b949e;
+        }
+        .idle-gpu-card .gpu-total strong { color: #58a6ff; font-weight: 500; }
+        .idle-gpu-card .gpu-total.error { color: #f85149; }
     </style>
 </head>
 <body>
@@ -350,18 +413,38 @@
             else showMsg('err', d.error);
         }
 
+        function renderGpuChips(ids) {
+            if (!ids || ids.length === 0) return '<span class="gpu-chip empty">无</span>';
+            return ids.map(i => `<span class="gpu-chip has-idle">${i}</span>`).join('');
+        }
+
         async function loadIdleGpus() {
             const d = await api('/api/cluster/servers/idle-gpus');
             const el = document.getElementById('idle-gpus');
-            if (!d.success) { el.innerHTML = '加载失败'; return; }
-            el.innerHTML = d.servers.map(s => {
-                let total = s.total_gpus;
-                let totalStr = total + '卡';
-                if (s.connection_error && total === 0) {
-                    totalStr = '<span style="color:#f85149">连接失败</span>';
-                }
-                return `<div style="margin-bottom:8px;"><strong>${s.server}</strong>: 训练用[${(s.train_idle_gpus||[]).join(',') || '无'}] | 测试用[${(s.test_idle_gpus||s.idle_gpus||[]).join(',') || '无'}] / 总${totalStr}</div>`;
-            }).join('') || '暂无服务器';
+            if (!d.success) { el.innerHTML = '<p style="color:#f85149;">加载失败</p>'; return; }
+            if (!d.servers || d.servers.length === 0) {
+                el.innerHTML = '<p style="color:#8b949e;">暂无服务器</p>';
+                return;
+            }
+            el.innerHTML = `<div class="idle-gpu-grid">${d.servers.map(s => {
+                const trainIds = s.train_idle_gpus || [];
+                const testIds = s.test_idle_gpus || s.idle_gpus || [];
+                const total = s.total_gpus;
+                const isError = s.connection_error && total === 0;
+                return `
+                <div class="idle-gpu-card ${isError ? 'error' : ''}">
+                    <div class="server-name"><i class="fas fa-server"></i>${s.server}</div>
+                    <div class="gpu-row">
+                        <span class="gpu-label">训练</span>
+                        <div class="gpu-value">${renderGpuChips(trainIds)}</div>
+                    </div>
+                    <div class="gpu-row">
+                        <span class="gpu-label">测试</span>
+                        <div class="gpu-value">${renderGpuChips(testIds)}</div>
+                    </div>
+                    <div class="gpu-total ${isError ? 'error' : ''}">共 <strong>${isError ? '连接失败' : total + ' 张 GPU'}</strong></div>
+                </div>`;
+            }).join('')}</div>`;
         }
 
         async function loadTraining() {

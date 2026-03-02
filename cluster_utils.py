@@ -8,12 +8,18 @@ import re
 DEFAULT_MEM_THRESHOLD = 20   # 显存使用率 %
 DEFAULT_UTIL_THRESHOLD = 15  # GPU算力使用率 %
 
+def _strip_ansi(text):
+    """移除 gpustat 输出中的 ANSI 颜色转义码"""
+    return re.sub(r'\x1b\[[0-9;]*m', '', text)
+
+
 def parse_gpustat_output(gpu_status_text):
     """
     解析 gpustat 输出，返回每块 GPU 的详细信息
     返回: [{'index': 0, 'name': '...', 'mem_used': 0, 'mem_total': 0, 'util': 0, 'temp': 0, 'processes': '...'}, ...]
     """
     result = []
+    gpu_status_text = _strip_ansi(gpu_status_text or '')
     lines = gpu_status_text.strip().split('\n')
     
     for line in lines:
@@ -22,7 +28,8 @@ def parse_gpustat_output(gpu_status_text):
             continue
         
         # gpustat 格式: [0] NVIDIA GeForce RTX 3090 | 45°C, 12% | 1024 / 24576 MiB | python(1234)
-        match = re.search(r'\[(\d+)\]\s+(.*?)\s*\|\s*(\d+)(?:°|C)?,?\s*(\d+)\s*%\s*\|\s*(\d+)\s*/\s*(\d+)\s*M[iI]?B\s*(?:\|\s*(.*))?$', line)
+        # 或: 45'C, 87 % | 5120 / 12288 MB  （支持 °/' 以及 数字和 % 之间的空格）
+        match = re.search(r'\[(\d+)\]\s+(.*?)\s*\|\s*(\d+)(?:[°\'])?C,?\s*(\d+)\s*%\s*\|\s*(\d+)\s*/\s*(\d+)\s*M[iI]?B\s*(?:\|\s*(.*))?$', line)
         if match:
             idx, name, temp, util, mem_used, mem_total, processes = match.groups()
             mem_used = int(mem_used)
