@@ -22,7 +22,6 @@ def parse_gpustat_output(gpu_status_text):
             continue
         
         # gpustat 格式: [0] NVIDIA GeForce RTX 3090 | 45°C, 12% | 1024 / 24576 MiB | python(1234)
-        # 或简化格式
         match = re.search(r'\[(\d+)\]\s+(.*?)\s*\|\s*(\d+)(?:°|C)?,?\s*(\d+)\s*%\s*\|\s*(\d+)\s*/\s*(\d+)\s*M[iI]?B\s*(?:\|\s*(.*))?$', line)
         if match:
             idx, name, temp, util, mem_used, mem_total, processes = match.groups()

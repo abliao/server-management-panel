@@ -36,6 +36,10 @@ CONFIG_CODE_PATH = 'code_path'
 CONFIG_DATA_PATH = 'data_path'
 CONFIG_MEM_THRESHOLD = 'gpu_mem_threshold'
 CONFIG_UTIL_THRESHOLD = 'gpu_util_threshold'
+CONFIG_TRAIN_MEM_THRESHOLD = 'train_gpu_mem_threshold'
+CONFIG_TRAIN_UTIL_THRESHOLD = 'train_gpu_util_threshold'
+CONFIG_TEST_MEM_THRESHOLD = 'test_gpu_mem_threshold'
+CONFIG_TEST_UTIL_THRESHOLD = 'test_gpu_util_threshold'
 CONFIG_RESERVED_GPU = 'reserved_gpu_count'
 
 # 验证管理员权限的装饰器
@@ -226,10 +230,16 @@ def get_used_ports_on_server(server):
     return parse_used_ports(out)
 
 
-def find_idle_server_and_gpus(gpu_count=1, reserved=0):
-    """在集群中找一台有空闲 GPU 的服务器，返回 (server, [gpu_ids]) 或 (None, [])"""
-    mem_th = int(db.get_config(CONFIG_MEM_THRESHOLD, 20))
-    util_th = int(db.get_config(CONFIG_UTIL_THRESHOLD, 15))
+def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train'):
+    """在集群中找一台有空闲 GPU 的服务器，返回 (server, [gpu_ids]) 或 (None, [])
+    task_type: 'train' 用训练阈值(显存/算力要求高)，'test' 用测试阈值(要求较低)
+    """
+    if task_type == 'test':
+        mem_th = int(db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
+        util_th = int(db.get_config(CONFIG_TEST_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
+    else:
+        mem_th = int(db.get_config(CONFIG_TRAIN_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
+        util_th = int(db.get_config(CONFIG_TRAIN_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
     reserved = int(db.get_config(CONFIG_RESERVED_GPU, 0))
     servers = load_servers()
     for srv in servers:
@@ -297,19 +307,19 @@ def cluster_task_scheduler():
             if not has_any_code_path:
                 time.sleep(15)
                 continue
-            # 训练任务调度
+            # 训练任务调度（使用训练用阈值）
             for task in db.get_pending_training_tasks():
-                server, gpu_ids = find_idle_server_and_gpus(gpu_count=1, reserved=0)
+                server, gpu_ids = find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train')
                 if server and gpu_ids:
                     ok, msg = run_training_on_server(task, server, gpu_ids)
                     if not ok:
                         db.update_training_task(task['id'], status='failed', error_message=str(msg))
                     time.sleep(2)  # 避免连续提交过快
-            # 测试任务调度
+            # 测试任务调度（使用测试用阈值，测试对显存/算力要求较低）
             for task in db.get_pending_test_tasks():
-                server, gpu_ids = find_idle_server_and_gpus(gpu_count=1, reserved=0)
+                server, gpu_ids = find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='test')
                 if not server:
-                    server, gpu_ids = find_idle_server_and_gpus(gpu_count=0, reserved=0)
+                    server, gpu_ids = find_idle_server_and_gpus(gpu_count=0, reserved=0, task_type='test')
                     gpu_ids = []
                 if server:
                     port = find_available_port_on_server(server)
@@ -1012,6 +1022,10 @@ def get_cluster_config():
             'data_path': db.get_config(CONFIG_DATA_PATH, ''),
             'gpu_mem_threshold': db.get_config(CONFIG_MEM_THRESHOLD, '20'),
             'gpu_util_threshold': db.get_config(CONFIG_UTIL_THRESHOLD, '15'),
+            'train_gpu_mem_threshold': db.get_config(CONFIG_TRAIN_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, '20'),
+            'train_gpu_util_threshold': db.get_config(CONFIG_TRAIN_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, '15'),
+            'test_gpu_mem_threshold': db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, '20'),
+            'test_gpu_util_threshold': db.get_config(CONFIG_TEST_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, '15'),
             'reserved_gpu_count': db.get_config(CONFIG_RESERVED_GPU, '0'),
         }
     })
@@ -1021,7 +1035,10 @@ def get_cluster_config():
 @require_admin
 def set_cluster_config():
     data = request.get_json() or {}
-    for k in [CONFIG_CODE_PATH, CONFIG_DATA_PATH, CONFIG_MEM_THRESHOLD, CONFIG_UTIL_THRESHOLD, CONFIG_RESERVED_GPU]:
+    keys = [CONFIG_CODE_PATH, CONFIG_DATA_PATH, CONFIG_MEM_THRESHOLD, CONFIG_UTIL_THRESHOLD,
+            CONFIG_TRAIN_MEM_THRESHOLD, CONFIG_TRAIN_UTIL_THRESHOLD, CONFIG_TEST_MEM_THRESHOLD, CONFIG_TEST_UTIL_THRESHOLD,
+            CONFIG_RESERVED_GPU]
+    for k in keys:
         if k in data:
             db.set_config(k, str(data[k]))
     return jsonify({'success': True})
@@ -1219,18 +1236,27 @@ def list_alerts():
 @app.route('/api/cluster/servers/idle-gpus')
 @require_admin
 def get_idle_gpus():
-    """获取各服务器空闲 GPU 信息"""
-    mem_th = int(db.get_config(CONFIG_MEM_THRESHOLD, 20))
-    util_th = int(db.get_config(CONFIG_UTIL_THRESHOLD, 15))
+    """获取各服务器空闲 GPU 信息（分别展示训练用、测试用空闲卡）"""
+    train_mem = int(db.get_config(CONFIG_TRAIN_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
+    train_util = int(db.get_config(CONFIG_TRAIN_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
+    test_mem = int(db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
+    test_util = int(db.get_config(CONFIG_TEST_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
     result = []
     for srv_name, st in server_status.items():
-        gpus = parse_gpustat_output(st.get('gpu_status', ''))
-        idle = find_idle_gpus(st.get('gpu_status', ''), mem_th, util_th)
+        gpu_text = st.get('gpu_status', '') or ''
+        is_error = 'Connection Error' in gpu_text or gpu_text.strip().startswith('Error:') or 'Loading...' in gpu_text
+        gpus = parse_gpustat_output(gpu_text)
+        train_idle = find_idle_gpus(gpu_text, train_mem, train_util)
+        test_idle = find_idle_gpus(gpu_text, test_mem, test_util)
         result.append({
             'server': srv_name,
-            'idle_gpus': idle,
+            'idle_gpus': test_idle,
+            'train_idle_gpus': train_idle,
+            'test_idle_gpus': test_idle,
             'total_gpus': len(gpus),
-            'gpus': gpus
+            'gpus': gpus,
+            'connection_error': is_error,
+            'gpu_status_preview': gpu_text[:80].replace('\n', ' ') if is_error else ''
         })
     return jsonify({'success': True, 'servers': result})
 

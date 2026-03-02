@@ -163,16 +163,26 @@
             <h2><i class="fas fa-sliders-h"></i> 集群配置</h2>
             <p style="color:#8b949e;font-size:0.85rem;margin-bottom:12px;">各服务器的代码路径、数据路径请在【管理面板 → 服务器编辑】中单独配置</p>
             <div class="form-row">
+                <div class="form-group" style="flex:0 0 100%;"><strong style="color:#7ee787;">训练用</strong>（显存/算力要求高，阈值更严格）</div>
                 <div class="form-group">
-                    <label>空闲GPU显存阈值(%)</label>
-                    <input type="number" id="cfg-mem-th" value="20" min="0" max="100">
+                    <label>训练-显存阈值(%)</label>
+                    <input type="number" id="cfg-train-mem" value="20" min="0" max="100">
                 </div>
                 <div class="form-group">
-                    <label>空闲GPU算力阈值(%)</label>
-                    <input type="number" id="cfg-util-th" value="15" min="0" max="100">
+                    <label>训练-算力阈值(%)</label>
+                    <input type="number" id="cfg-train-util" value="15" min="0" max="100">
+                </div>
+                <div class="form-group" style="flex:0 0 100%; margin-top:12px;"><strong style="color:#7ee787;">测试用</strong>（要求较低，可用更繁忙的卡）</div>
+                <div class="form-group">
+                    <label>测试-显存阈值(%)</label>
+                    <input type="number" id="cfg-test-mem" value="20" min="0" max="100">
                 </div>
                 <div class="form-group">
-                    <label>每机保留卡数(模型调度冗余)</label>
+                    <label>测试-算力阈值(%)</label>
+                    <input type="number" id="cfg-test-util" value="15" min="0" max="100">
+                </div>
+                <div class="form-group">
+                    <label>每机保留卡数</label>
                     <input type="number" id="cfg-reserved" value="0" min="0">
                 </div>
                 <div class="form-group" style="display:flex;align-items:flex-end;">
@@ -316,8 +326,10 @@
             const d = await api('/api/cluster/config');
             if (d.success) {
                 const c = d.config;
-                document.getElementById('cfg-mem-th').value = c.gpu_mem_threshold || '20';
-                document.getElementById('cfg-util-th').value = c.gpu_util_threshold || '15';
+                document.getElementById('cfg-train-mem').value = c.train_gpu_mem_threshold || '20';
+                document.getElementById('cfg-train-util').value = c.train_gpu_util_threshold || '15';
+                document.getElementById('cfg-test-mem').value = c.test_gpu_mem_threshold || '20';
+                document.getElementById('cfg-test-util').value = c.test_gpu_util_threshold || '15';
                 document.getElementById('cfg-reserved').value = c.reserved_gpu_count || '0';
             }
         }
@@ -327,8 +339,10 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    gpu_mem_threshold: document.getElementById('cfg-mem-th').value,
-                    gpu_util_threshold: document.getElementById('cfg-util-th').value,
+                    train_gpu_mem_threshold: document.getElementById('cfg-train-mem').value,
+                    train_gpu_util_threshold: document.getElementById('cfg-train-util').value,
+                    test_gpu_mem_threshold: document.getElementById('cfg-test-mem').value,
+                    test_gpu_util_threshold: document.getElementById('cfg-test-util').value,
                     reserved_gpu_count: document.getElementById('cfg-reserved').value
                 })
             });
@@ -340,9 +354,14 @@
             const d = await api('/api/cluster/servers/idle-gpus');
             const el = document.getElementById('idle-gpus');
             if (!d.success) { el.innerHTML = '加载失败'; return; }
-            el.innerHTML = d.servers.map(s => 
-                `<div style="margin-bottom:8px;"><strong>${s.server}</strong>: 空闲GPU [${s.idle_gpus.join(',') || '无'}] / 总${s.total_gpus}卡</div>`
-            ).join('') || '暂无服务器';
+            el.innerHTML = d.servers.map(s => {
+                let total = s.total_gpus;
+                let totalStr = total + '卡';
+                if (s.connection_error && total === 0) {
+                    totalStr = '<span style="color:#f85149">连接失败</span>';
+                }
+                return `<div style="margin-bottom:8px;"><strong>${s.server}</strong>: 训练用[${(s.train_idle_gpus||[]).join(',') || '无'}] | 测试用[${(s.test_idle_gpus||s.idle_gpus||[]).join(',') || '无'}] / 总${totalStr}</div>`;
+            }).join('') || '暂无服务器';
         }
 
         async function loadTraining() {
