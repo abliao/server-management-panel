@@ -230,9 +230,10 @@ def get_used_ports_on_server(server):
     return parse_used_ports(out)
 
 
-def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train'):
+def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowed_servers=None):
     """在集群中找一台有空闲 GPU 的服务器，返回 (server, [gpu_ids]) 或 (None, [])
     task_type: 'train' 用训练阈值(显存/算力要求高)，'test' 用测试阈值(要求较低)
+    allowed_servers: 可选，服务器名列表；为空或 None 时考虑所有服务器
     """
     if task_type == 'test':
         mem_th = int(db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
@@ -242,6 +243,9 @@ def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train'):
         util_th = int(db.get_config(CONFIG_TRAIN_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
     reserved = int(db.get_config(CONFIG_RESERVED_GPU, 0))
     servers = load_servers()
+    if allowed_servers:
+        allow_set = set(s.strip() for s in allowed_servers if s and str(s).strip())
+        servers = [s for s in servers if s['name'] in allow_set]
     for srv in servers:
         st = server_status.get(srv['name'], {})
         gpu_text = st.get('gpu_status', '')
@@ -309,7 +313,8 @@ def cluster_task_scheduler():
                 continue
             # 训练任务调度（使用训练用阈值）
             for task in db.get_pending_training_tasks():
-                server, gpu_ids = find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train')
+                allowed = task.get('allowed_servers') or []
+                server, gpu_ids = find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowed_servers=allowed if allowed else None)
                 if server and gpu_ids:
                     ok, msg = run_training_on_server(task, server, gpu_ids)
                     if not ok:
@@ -1053,9 +1058,10 @@ def submit_training_task():
     script_path = data.get('script_path', '').strip()
     script_args = data.get('script_args', '')
     priority = int(data.get('priority', 5))
+    allowed_servers = data.get('allowed_servers')  # 可选，服务器名列表；空/不传表示所有服务器
     if not name or not script_path:
         return jsonify({'success': False, 'error': '任务名和脚本路径必填'})
-    ok, result = db.add_training_task(name, script_path, script_args, priority)
+    ok, result = db.add_training_task(name, script_path, script_args, priority, allowed_servers=allowed_servers)
     if ok:
         return jsonify({'success': True, 'task_id': result})
     return jsonify({'success': False, 'error': str(result)})

@@ -121,6 +121,11 @@ class DatabaseManager:
                     error_message TEXT
                 )
             ''')
+            # 迁移：为训练任务表添加 allowed_servers（可选服务器白名单，空表示所有服务器）
+            cursor.execute("PRAGMA table_info(training_tasks)")
+            train_cols = [r[1] for r in cursor.fetchall()]
+            if 'allowed_servers' not in train_cols:
+                cursor.execute("ALTER TABLE training_tasks ADD COLUMN allowed_servers TEXT DEFAULT ''")
             
             # 测试任务表
             cursor.execute('''
@@ -473,14 +478,16 @@ class DatabaseManager:
             return False
     
     # ========== 训练任务 ==========
-    def add_training_task(self, name, script_path, script_args='', priority=5):
+    def add_training_task(self, name, script_path, script_args='', priority=5, allowed_servers=None):
+        """allowed_servers: 可选服务器名列表，空/None 表示所有服务器可用"""
         try:
+            allowed_str = json.dumps(allowed_servers or []) if allowed_servers is not None else '[]'
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO training_tasks (name, script_path, script_args, priority, status)
-                    VALUES (?, ?, ?, ?, 'pending')
-                ''', (name, script_path, script_args, priority))
+                    INSERT INTO training_tasks (name, script_path, script_args, priority, allowed_servers, status)
+                    VALUES (?, ?, ?, ?, ?, 'pending')
+                ''', (name, script_path, script_args, priority, allowed_str))
                 conn.commit()
                 return True, cursor.lastrowid
         except Exception as e:
@@ -535,11 +542,18 @@ class DatabaseManager:
             return []
     
     def _row_to_training_task(self, row):
+        allowed = []
+        if len(row) > 15 and row[15]:
+            try:
+                allowed = json.loads(row[15])
+            except (TypeError, ValueError):
+                pass
         return {
             'id': row[0], 'name': row[1], 'script_path': row[2], 'script_args': row[3] or '',
             'server_name': row[4], 'gpu_ids': row[5], 'priority': row[6], 'status': row[7],
             'log_path': row[8], 'weight_path': row[9], 'pid': row[10],
-            'created_at': row[11], 'started_at': row[12], 'finished_at': row[13], 'error_message': row[14]
+            'created_at': row[11], 'started_at': row[12], 'finished_at': row[13], 'error_message': row[14],
+            'allowed_servers': allowed
         }
     
     # ========== 测试任务 ==========

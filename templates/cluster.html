@@ -284,6 +284,18 @@
                     <button class="btn btn-primary" onclick="submitTraining()">提交训练</button>
                 </div>
             </div>
+            <div class="form-row" style="align-items:flex-start;">
+                <div class="form-group" style="flex:0 0 100%;">
+                    <label>可选服务器 <span style="color:#8b949e;font-weight:400;font-size:0.85em;">（不选=全部可用）</span></label>
+                    <div id="train-server-choices" class="server-checkboxes" style="display:flex;flex-wrap:wrap;gap:12px 20px;margin-top:6px;padding:10px;background:#0d1117;border-radius:6px;border:1px solid #30363d;">
+                        <span style="color:#6e7681;font-size:0.9em;">加载中...</span>
+                    </div>
+                    <div style="margin-top:6px;">
+                        <button type="button" class="btn btn-secondary" style="padding:4px 10px;font-size:0.8rem;" onclick="trainServerSelectAll()">全选</button>
+                        <button type="button" class="btn btn-secondary" style="padding:4px 10px;font-size:0.8rem;margin-left:8px;" onclick="trainServerSelectNone()">清空</button>
+                    </div>
+                </div>
+            </div>
             <div class="table-wrap" style="margin-top:16px;">
                 <table>
                     <thead>
@@ -445,6 +457,35 @@
                     <div class="gpu-total ${isError ? 'error' : ''}">共 <strong>${isError ? '连接失败' : total + ' 张 GPU'}</strong></div>
                 </div>`;
             }).join('')}</div>`;
+            updateTrainServerChoices(d.servers.map(s => s.server));
+        }
+
+        function updateTrainServerChoices(serverNames) {
+            const el = document.getElementById('train-server-choices');
+            if (!el || !serverNames || serverNames.length === 0) {
+                el.innerHTML = '<span style="color:#6e7681;">暂无服务器</span>';
+                return;
+            }
+            el.innerHTML = serverNames.map(name =>
+                `<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:0.9rem;">
+                    <input type="checkbox" class="train-server-cb" value="${name.replace(/"/g, '&quot;')}" checked>
+                    ${name.replace(/</g, '&lt;').replace(/>/g, '&gt;')}
+                </label>`
+            ).join('');
+        }
+
+        function trainServerSelectAll() {
+            document.querySelectorAll('.train-server-cb').forEach(cb => cb.checked = true);
+        }
+
+        function trainServerSelectNone() {
+            document.querySelectorAll('.train-server-cb').forEach(cb => cb.checked = false);
+        }
+
+        function getTrainSelectedServers() {
+            const checked = document.querySelectorAll('.train-server-cb:checked');
+            const names = Array.from(checked).map(cb => cb.value.trim()).filter(Boolean);
+            return names;
         }
 
         async function loadTraining() {
@@ -474,11 +515,14 @@
             const script = document.getElementById('train-script').value.trim();
             const args = document.getElementById('train-args').value.trim();
             const priority = document.getElementById('train-priority').value;
+            const allowedServers = getTrainSelectedServers();
             if (!name || !script) { showMsg('err', '任务名和脚本路径必填'); return; }
+            const payload = { name, script_path: script, script_args: args, priority: parseInt(priority) };
+            if (allowedServers.length > 0) payload.allowed_servers = allowedServers;
             const d = await api('/api/cluster/training/submit', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, script_path: script, script_args: args, priority: parseInt(priority) })
+                body: JSON.stringify(payload)
             });
             if (d.success) { showMsg('ok', '训练任务已提交，等待调度'); loadTraining(); }
             else showMsg('err', d.error);
