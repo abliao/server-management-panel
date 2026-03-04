@@ -41,9 +41,6 @@ CONFIG_TRAIN_UTIL_THRESHOLD = 'train_gpu_util_threshold'
 CONFIG_TEST_MEM_THRESHOLD = 'test_gpu_mem_threshold'
 CONFIG_TEST_UTIL_THRESHOLD = 'test_gpu_util_threshold'
 CONFIG_RESERVED_GPU = 'reserved_gpu_count'
-# 训练/测试使用的 Conda 环境（可选）
-CONFIG_TRAIN_CONDA_ENV = 'train_conda_env'
-CONFIG_TEST_CONDA_ENV = 'test_conda_env'
 
 # 验证管理员权限的装饰器
 def require_admin(f):
@@ -314,10 +311,7 @@ def run_training_on_server(task, server, gpu_ids):
     gpu_str = ','.join(map(str, gpu_ids))
     log_path = f"/tmp/train_{task['id']}_{int(time.time())}.log"
     runner = 'bash' if script.lower().endswith('.sh') else 'python'
-    # 可选：激活训练用 Conda 环境（依赖于 ~/.bashrc 中的 conda 初始化）
-    train_env = (db.get_config(CONFIG_TRAIN_CONDA_ENV, '') or '').strip()
-    conda_prefix = f'conda activate {train_env} && ' if train_env else ''
-    cmd = f'{conda_prefix}CUDA_VISIBLE_DEVICES={gpu_str} nohup {runner} {script} {args} > {log_path} 2>&1 & echo $!'
+    cmd = f'CUDA_VISIBLE_DEVICES={gpu_str} nohup {runner} {script} {args} > {log_path} 2>&1 & echo $!'
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
         return False, out
@@ -340,10 +334,7 @@ def run_test_on_server(task, server, gpu_ids, port):
     log_path = f"/tmp/test_{task['id']}_{int(time.time())}.log"
     # 假设测试脚本接受 --port 和 --weight 等参数
     extra = f'--port {port} --weight {weight}' if weight else f'--port {port}'
-    # 可选：激活测试用 Conda 环境
-    test_env = (db.get_config(CONFIG_TEST_CONDA_ENV, '') or '').strip()
-    conda_prefix = f'conda activate {test_env} && ' if test_env else ''
-    cmd = f'{conda_prefix}{env} nohup python {script} {args} {extra} > {log_path} 2>&1 & echo $!'
+    cmd = f'{env} nohup python {script} {args} {extra} > {log_path} 2>&1 & echo $!'
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
         return False, out
@@ -1085,8 +1076,6 @@ def get_cluster_config():
             'test_gpu_mem_threshold': db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, '20'),
             'test_gpu_util_threshold': db.get_config(CONFIG_TEST_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, '15'),
             'reserved_gpu_count': db.get_config(CONFIG_RESERVED_GPU, '0'),
-            'train_conda_env': db.get_config(CONFIG_TRAIN_CONDA_ENV, '') or '',
-            'test_conda_env': db.get_config(CONFIG_TEST_CONDA_ENV, '') or '',
         }
     })
 
@@ -1097,7 +1086,7 @@ def set_cluster_config():
     data = request.get_json() or {}
     keys = [CONFIG_CODE_PATH, CONFIG_DATA_PATH, CONFIG_MEM_THRESHOLD, CONFIG_UTIL_THRESHOLD,
             CONFIG_TRAIN_MEM_THRESHOLD, CONFIG_TRAIN_UTIL_THRESHOLD, CONFIG_TEST_MEM_THRESHOLD, CONFIG_TEST_UTIL_THRESHOLD,
-            CONFIG_RESERVED_GPU, CONFIG_TRAIN_CONDA_ENV, CONFIG_TEST_CONDA_ENV]
+            CONFIG_RESERVED_GPU]
     for k in keys:
         if k in data:
             db.set_config(k, str(data[k]))
@@ -1145,10 +1134,17 @@ def get_training_log(task_id):
     server = db.get_server_by_name(task['server_name'])
     if not server:
         return jsonify({'success': False, 'error': '服务器不存在'})
-    ok, content = execute_ssh_command_silent(server, f'cat {task["log_path"]} 2>/dev/null || echo "(日志文件不存在)"')
+    log_path = task['log_path']
+    # 先在内容前面标注日志路径，方便排查
+    prefix = f'[日志路径] {log_path}\\n\\n'
+    # 远程读取日志文件；不存在时给出提示
+    ok, content = execute_ssh_command_silent(
+        server,
+        f'if [ -f "{log_path}" ]; then cat "{log_path}"; else echo "(日志文件不存在)"; fi'
+    )
     if not ok:
         return jsonify({'success': False, 'error': content})
-    return Response(content, mimetype='text/plain; charset=utf-8')
+    return Response(prefix + (content or ''), mimetype='text/plain; charset=utf-8')
 
 
 @app.route('/api/cluster/training/<int:task_id>/kill', methods=['POST'])
