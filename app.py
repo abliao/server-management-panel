@@ -222,6 +222,34 @@ def execute_ssh_command_silent(server, command, timeout=60):
         return False, str(e)
 
 
+def kill_process_group(server, pid, timeout=15):
+    """
+    在远程服务器上尽量干净地杀掉该 PID 及其所有子进程：
+    - 递归查出该 PID 的所有子进程（包括多级子进程）
+    - 对收集到的所有 PID 执行 kill -9
+    - 最后通过 ps 校验是否还有这些 PID 存活
+    """
+    cmd = (
+        f'root={pid}; '
+        'collect_children() { '
+        '  local p=$1; '
+        '  echo "$p"; '
+        '  for c in $(ps -o pid= --ppid "$p" 2>/dev/null); do '
+        '    collect_children "$c"; '
+        '  done; '
+        '}; '
+        'pids=$(collect_children "$root" 2>/dev/null | tr "\\n" " "); '
+        'kill -9 $pids 2>/dev/null || true; '
+        'sleep 1; '
+        'for p in $pids; do ps -o pid= -p "$p" 2>/dev/null; done | tr -d " \\n "'
+    )
+    ok, out = execute_ssh_command_silent(server, cmd, timeout=timeout)
+    if not ok:
+        return False, False, out
+    alive = bool((out or '').strip())
+    return True, not alive, out
+
+
 def freeze_training_script_for_task(task_id, script_path, allowed_servers):
     """
     提交训练任务时冻结脚本：
@@ -315,8 +343,16 @@ def run_training_on_server(task, server, gpu_ids):
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
         return False, out
-    pid_match = re.search(r'(\d+)', out.strip().split('\n')[-1])
-    pid = int(pid_match.group(1)) if pid_match else None
+
+    # 从输出中严格解析 PID（最后一行必须是纯数字）
+    lines = [ln.strip() for ln in (out or '').split('\n') if ln.strip()]
+    if not lines:
+        return False, f'启动训练失败，未获取到 PID，输出为空: {out}'
+    last = lines[-1]
+    pid_match = re.fullmatch(r'(\d+)', last)
+    if not pid_match:
+        return False, f'启动训练失败，未获取到有效 PID，输出: {out}'
+    pid = int(pid_match.group(1))
     db.update_training_task(task['id'], server_name=server['name'], gpu_ids=','.join(map(str, gpu_ids)),
                             status='running', log_path=log_path, pid=pid,
                             started_at=datetime.now(CST).isoformat())
@@ -338,8 +374,15 @@ def run_test_on_server(task, server, gpu_ids, port):
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
         return False, out
-    pid_match = re.search(r'(\d+)', out.strip().split('\n')[-1])
-    pid = int(pid_match.group(1)) if pid_match else None
+
+    lines = [ln.strip() for ln in (out or '').split('\n') if ln.strip()]
+    if not lines:
+        return False, f'启动测试失败，未获取到 PID，输出为空: {out}'
+    last = lines[-1]
+    pid_match = re.fullmatch(r'(\d+)', last)
+    if not pid_match:
+        return False, f'启动测试失败，未获取到有效 PID，输出: {out}'
+    pid = int(pid_match.group(1))
     db.update_test_task(task['id'], server_name=server['name'], gpu_ids=','.join(map(str, gpu_ids)) if gpu_ids else '',
                         port=port, status='running', pid=pid, started_at=datetime.now(CST).isoformat())
     return True, {'pid': pid, 'port': port, 'log_path': log_path}
@@ -1159,7 +1202,11 @@ def kill_training_task(task_id):
     pid = task.get('pid')
     if not pid:
         return jsonify({'success': False, 'error': '无 PID'})
-    ok, out = execute_ssh_command_silent(server, f'kill -9 {pid} 2>/dev/null; echo done')
+    ok, killed, out = kill_process_group(server, pid)
+    if not ok:
+        return jsonify({'success': False, 'error': f'发送 kill 失败: {out}'})
+    if not killed:
+        return jsonify({'success': False, 'error': f'进程仍在运行 (pid={pid})，请手动检查'})
     db.update_training_task(task_id, status='killed', finished_at=datetime.now(CST).isoformat())
     return jsonify({'success': True})
 
@@ -1220,7 +1267,11 @@ def kill_test_task(task_id):
     pid = task.get('pid')
     if not pid:
         return jsonify({'success': False, 'error': '无 PID'})
-    ok, out = execute_ssh_command_silent(server, f'kill -9 {pid} 2>/dev/null; echo done')
+    ok, killed, out = kill_process_group(server, pid)
+    if not ok:
+        return jsonify({'success': False, 'error': f'发送 kill 失败: {out}'})
+    if not killed:
+        return jsonify({'success': False, 'error': f'进程仍在运行 (pid={pid})，请手动检查'})
     db.update_test_task(task_id, status='killed', finished_at=datetime.now(CST).isoformat())
     return jsonify({'success': True})
 
