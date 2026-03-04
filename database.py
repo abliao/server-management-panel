@@ -495,7 +495,7 @@ class DatabaseManager:
     
     def update_training_task(self, task_id, **kwargs):
         try:
-            allowed = {'server_name', 'gpu_ids', 'status', 'log_path', 'weight_path', 'pid', 'started_at', 'finished_at', 'error_message'}
+            allowed = {'server_name', 'gpu_ids', 'status', 'log_path', 'weight_path', 'pid', 'started_at', 'finished_at', 'error_message', 'script_path'}
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 updates = []

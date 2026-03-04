@@ -225,6 +225,49 @@ def execute_ssh_command_silent(server, command, timeout=60):
         return False, str(e)
 
 
+def freeze_training_script_for_task(task_id, script_path, allowed_servers):
+    """
+    提交训练任务时冻结脚本：
+    - 在每台相关服务器的代码目录下创建 .cluster_snapshots 目录
+    - 将当前脚本拷贝为带 task_id+时间戳 的新文件
+    - 更新训练任务的 script_path 指向该快照文件
+    """
+    # 选择需要冻结的服务器
+    servers = []
+    if allowed_servers:
+        names = [str(s).strip() for s in (allowed_servers or []) if str(s).strip()]
+        for name in names:
+            srv = db.get_server_by_name(name)
+            if srv:
+                servers.append(srv)
+    else:
+        servers = load_servers()
+    if not servers:
+        return False, '没有可用服务器用于冻结脚本'
+
+    base = os.path.basename(script_path)
+    root, ext = os.path.splitext(base)
+    if not ext:
+        ext = '.sh'
+    ts = int(time.time())
+    snapshot_rel = f".cluster_snapshots/{root}_task{task_id}_{ts}{ext}"
+
+    errors = []
+    for srv in servers:
+        # 在对应服务器代码目录下复制当前脚本到快照路径
+        cmd = f"mkdir -p .cluster_snapshots && cp -f {script_path} {snapshot_rel}"
+        ok, out = execute_ssh_command_silent(srv, cmd, timeout=20)
+        if not ok:
+            errors.append(f"{srv['name']}: {out}")
+
+    if errors:
+        return False, '; '.join(errors)
+
+    # 更新任务的脚本路径为快照路径
+    db.update_training_task(task_id, script_path=snapshot_rel)
+    return True, snapshot_rel
+
+
 def get_used_ports_on_server(server):
     """获取服务器上已占用的端口"""
     ok, out = execute_ssh_command_silent(server, 'ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || netstat -an 2>/dev/null')
@@ -1074,9 +1117,15 @@ def submit_training_task():
     if not name or not script_path:
         return jsonify({'success': False, 'error': '任务名和脚本路径必填'})
     ok, result = db.add_training_task(name, script_path, script_args, priority, allowed_servers=allowed_servers)
-    if ok:
-        return jsonify({'success': True, 'task_id': result})
-    return jsonify({'success': False, 'error': str(result)})
+    if not ok:
+        return jsonify({'success': False, 'error': str(result)})
+    task_id = result
+    # 提交时冻结脚本：为该任务创建脚本快照
+    freeze_ok, freeze_info = freeze_training_script_for_task(task_id, script_path, allowed_servers)
+    if not freeze_ok:
+        db.update_training_task(task_id, status='failed', error_message=str(freeze_info))
+        return jsonify({'success': False, 'error': f'冻结脚本失败: {freeze_info}'})
+    return jsonify({'success': True, 'task_id': task_id})
 
 
 @app.route('/api/cluster/training/list')
