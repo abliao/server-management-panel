@@ -208,6 +208,22 @@
         }
         .idle-gpu-card .gpu-total strong { color: #58a6ff; font-weight: 500; }
         .idle-gpu-card .gpu-total.error { color: #f85149; }
+
+        /* 折叠开关 */
+        .section-toggle {
+            margin-left: 10px;
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 999px;
+            border: 1px solid #30363d;
+            background: #0d1117;
+            color: #8b949e;
+            cursor: pointer;
+        }
+        .section-toggle:hover {
+            background: #21262d;
+            color: #c9d1d9;
+        }
     </style>
 </head>
 <body>
@@ -262,7 +278,12 @@
 
         <!-- 训练任务 -->
         <div class="section">
-            <h2><i class="fas fa-brain"></i> 训练任务</h2>
+            <h2>
+                <i class="fas fa-brain"></i> 训练任务
+                <button type="button" class="section-toggle" onclick="toggleSection('train')">折叠/展开</button>
+                <button type="button" class="section-toggle" onclick="fillLastTrainForm()">填入上次</button>
+            </h2>
+            <div id="train-section-body">
             <div class="form-row">
                 <div class="form-group">
                     <label>任务名</label>
@@ -308,11 +329,17 @@
                     <tbody id="train-list"></tbody>
                 </table>
             </div>
+            </div>
         </div>
 
         <!-- 测试任务 -->
         <div class="section">
-            <h2><i class="fas fa-vial"></i> 测试任务</h2>
+            <h2>
+                <i class="fas fa-vial"></i> 测试任务
+                <button type="button" class="section-toggle" onclick="toggleSection('test')">折叠/展开</button>
+                <button type="button" class="section-toggle" onclick="fillLastTestForm()">填入上次</button>
+            </h2>
+            <div id="test-section-body">
             <div class="form-row">
                 <div class="form-group">
                     <label>任务名</label>
@@ -346,6 +373,7 @@
                     <tbody id="test-list"></tbody>
                 </table>
             </div>
+            </div>
         </div>
 
         <!-- 模型权重 -->
@@ -369,8 +397,13 @@
 
         <!-- 内存报警 -->
         <div class="section">
-            <h2><i class="fas fa-exclamation-triangle"></i> 报警记录</h2>
-            <div id="alert-list"></div>
+            <h2>
+                <i class="fas fa-exclamation-triangle"></i> 报警记录
+                <button type="button" class="section-toggle" onclick="toggleSection('alert')">折叠/展开</button>
+            </h2>
+            <div id="alert-section-body">
+                <div id="alert-list"></div>
+            </div>
         </div>
     </main>
 
@@ -386,6 +419,9 @@
     </div>
 
     <script>
+        const TRAIN_FORM_KEY = 'cluster_last_train_form';
+        const TEST_FORM_KEY = 'cluster_last_test_form';
+
         function showMsg(type, text) {
             const el = document.getElementById('msg');
             el.style.display = 'block';
@@ -399,6 +435,89 @@
         async function api(path, opts = {}) {
             const r = await fetch(path, opts);
             return r.json();
+        }
+
+        const sectionCollapsed = {
+            train: true,
+            test: true,
+            alert: true,
+        };
+
+        function saveLastTrainForm(payload, allowedServers) {
+            try {
+                const data = {
+                    name: payload.name || '',
+                    script_path: payload.script_path || '',
+                    script_args: payload.script_args || '',
+                    priority: payload.priority || 5,
+                    gpu_count: payload.gpu_count || 1,
+                    allowed_servers: allowedServers || []
+                };
+                localStorage.setItem(TRAIN_FORM_KEY, JSON.stringify(data));
+            } catch (e) {}
+        }
+
+        function fillLastTrainForm() {
+            try {
+                const raw = localStorage.getItem(TRAIN_FORM_KEY);
+                if (!raw) { showMsg('err', '暂无上次训练参数'); return; }
+                const d = JSON.parse(raw);
+                document.getElementById('train-name').value = d.name || '';
+                document.getElementById('train-script').value = d.script_path || '';
+                document.getElementById('train-args').value = d.script_args || '';
+                document.getElementById('train-priority').value = d.priority || 5;
+                document.getElementById('train-gpu-count').value = d.gpu_count || 1;
+                if (Array.isArray(d.allowed_servers) && d.allowed_servers.length > 0) {
+                    document.querySelectorAll('.train-server-cb').forEach(cb => {
+                        cb.checked = d.allowed_servers.includes(cb.value);
+                    });
+                }
+                showMsg('ok', '已填入上次训练参数');
+            } catch (e) {
+                showMsg('err', '读取上次训练参数失败');
+            }
+        }
+
+        function saveLastTestForm(payload) {
+            try {
+                const data = {
+                    name: payload.name || '',
+                    task_type: payload.task_type || 'mock',
+                    weight_path: payload.weight_path || '',
+                    script_path: payload.script_path || '',
+                    script_args: payload.script_args || ''
+                };
+                localStorage.setItem(TEST_FORM_KEY, JSON.stringify(data));
+            } catch (e) {}
+        }
+
+        function fillLastTestForm() {
+            try {
+                const raw = localStorage.getItem(TEST_FORM_KEY);
+                if (!raw) { showMsg('err', '暂无上次测试参数'); return; }
+                const d = JSON.parse(raw);
+                document.getElementById('test-name').value = d.name || '';
+                document.getElementById('test-type').value = d.task_type || 'mock';
+                document.getElementById('test-weight').value = d.weight_path || '';
+                document.getElementById('test-script').value = d.script_path || '';
+                document.getElementById('test-args').value = d.script_args || '';
+                showMsg('ok', '已填入上次测试参数');
+            } catch (e) {
+                showMsg('err', '读取上次测试参数失败');
+            }
+        }
+
+        function toggleSection(key) {
+            if (!(key in sectionCollapsed)) return;
+            sectionCollapsed[key] = !sectionCollapsed[key];
+            // 重新渲染对应列表，折叠状态下只显示前 10 条
+            if (key === 'train') {
+                loadTraining();
+            } else if (key === 'test') {
+                loadTest();
+            } else if (key === 'alert') {
+                loadAlerts();
+            }
         }
 
         async function loadConfig() {
@@ -470,12 +589,25 @@
                 el.innerHTML = '<span style="color:#6e7681;">暂无服务器</span>';
                 return;
             }
-            el.innerHTML = serverNames.map(name =>
-                `<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:0.9rem;">
-                    <input type="checkbox" class="train-server-cb" value="${name.replace(/"/g, '&quot;')}" checked>
-                    ${name.replace(/</g, '&lt;').replace(/>/g, '&gt;')}
-                </label>`
-            ).join('');
+            // 读取上次保存的服务器选择
+            let lastAllowed = [];
+            try {
+                const raw = localStorage.getItem(TRAIN_FORM_KEY);
+                if (raw) {
+                    const d = JSON.parse(raw);
+                    if (Array.isArray(d.allowed_servers)) lastAllowed = d.allowed_servers;
+                }
+            } catch (e) {}
+
+            el.innerHTML = serverNames.map(name => {
+                const safeName = name.replace(/"/g, '&quot;');
+                const labelName = name.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const checked = !lastAllowed.length || lastAllowed.includes(name);
+                return `<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:0.9rem;">
+                    <input type="checkbox" class="train-server-cb" value="${safeName}" ${checked ? 'checked' : ''}>
+                    ${labelName}
+                </label>`;
+            }).join('');
         }
 
         function trainServerSelectAll() {
@@ -497,7 +629,9 @@
             const tbody = document.getElementById('train-list');
             if (!d.success) { tbody.innerHTML = '<tr><td colspan="7">加载失败</td></tr>'; return; }
             const statusClass = { pending: 'badge-pending', running: 'badge-running', done: 'badge-done', failed: 'badge-failed', killed: 'badge-killed' };
-            tbody.innerHTML = d.tasks.map(t => `
+            const tasks = d.tasks || [];
+            const shown = sectionCollapsed.train ? tasks.slice(0, 10) : tasks;
+            let rows = shown.map(t => `
                 <tr>
                     <td>${t.id}</td>
                     <td>${t.name}</td>
@@ -511,7 +645,13 @@
                         ${(t.status === 'done' || t.status === 'running') && !t.weight_path ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="recordWeight(${t.id},'${(t.name||'').replace(/'/g,"\\'")}')">记录权重</button>` : ''}
                     </td>
                 </tr>
-            `).join('') || '<tr><td colspan="7">暂无训练任务</td></tr>';
+            `).join('');
+            if (!rows) {
+                rows = '<tr><td colspan="7">暂无训练任务</td></tr>';
+            } else if (sectionCollapsed.train && tasks.length > 10) {
+                rows += `<tr><td colspan="7" style="text-align:center;color:#8b949e;font-size:0.8rem;">共 ${tasks.length} 条，仅显示前 10 条，点击“折叠/展开”查看全部</td></tr>`;
+            }
+            tbody.innerHTML = rows;
         }
 
         async function submitTraining() {
@@ -530,6 +670,8 @@
                 gpu_count: isNaN(gpuCount) || gpuCount < 1 ? 1 : gpuCount
             };
             if (allowedServers.length > 0) payload.allowed_servers = allowedServers;
+            // 本地记录上一次训练参数，方便复用
+            saveLastTrainForm(payload, allowedServers);
             const d = await api('/api/cluster/training/submit', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -575,7 +717,9 @@
             const tbody = document.getElementById('test-list');
             if (!d.success) { tbody.innerHTML = '<tr><td colspan="7">加载失败</td></tr>'; return; }
             const statusClass = { pending: 'badge-pending', running: 'badge-running', done: 'badge-done', failed: 'badge-failed', killed: 'badge-killed' };
-            tbody.innerHTML = d.tasks.map(t => `
+            const tasks = d.tasks || [];
+            const shown = sectionCollapsed.test ? tasks.slice(0, 10) : tasks;
+            let rows = shown.map(t => `
                 <tr>
                     <td>${t.id}</td>
                     <td>${t.name}</td>
@@ -587,7 +731,13 @@
                         ${t.status === 'running' ? `<button class="btn btn-danger" style="padding:4px 8px;font-size:0.8rem;" onclick="killTest(${t.id})">停止</button>` : ''}
                     </td>
                 </tr>
-            `).join('') || '<tr><td colspan="7">暂无测试任务</td></tr>';
+            `).join('');
+            if (!rows) {
+                rows = '<tr><td colspan="7">暂无测试任务</td></tr>';
+            } else if (sectionCollapsed.test && tasks.length > 10) {
+                rows += `<tr><td colspan="7" style="text-align:center;color:#8b949e;font-size:0.8rem;">共 ${tasks.length} 条，仅显示前 10 条，点击“折叠/展开”查看全部</td></tr>`;
+            }
+            tbody.innerHTML = rows;
         }
 
         async function submitTest() {
@@ -597,10 +747,13 @@
             const script = document.getElementById('test-script').value.trim();
             const args = document.getElementById('test-args').value.trim();
             if (!name) { showMsg('err', '任务名必填'); return; }
+            const payload = { name, task_type: type, weight_path: weight, script_path: script, script_args: args };
+            // 本地记录上一次测试参数
+            saveLastTestForm(payload);
             const d = await api('/api/cluster/test/submit', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, task_type: type, weight_path: weight, script_path: script, script_args: args })
+                body: JSON.stringify(payload)
             });
             if (d.success) { showMsg('ok', '测试任务已提交'); loadTest(); }
             else showMsg('err', d.error);
@@ -640,9 +793,19 @@
             const d = await api('/api/cluster/alerts');
             const el = document.getElementById('alert-list');
             if (!d.success) { el.innerHTML = '加载失败'; return; }
-            el.innerHTML = d.alerts.length ? d.alerts.map(a => 
+            const alerts = d.alerts || [];
+            const shown = sectionCollapsed.alert ? alerts.slice(0, 10) : alerts;
+            if (!shown.length) {
+                el.innerHTML = '<p style="color:#8b949e;">暂无报警</p>';
+                return;
+            }
+            let html = shown.map(a =>
                 `<div style="padding:8px;background:#21262d;border-radius:6px;margin-bottom:8px;">${a.server_name} - ${a.alert_type}: ${a.message}</div>`
-            ).join('') : '<p style="color:#8b949e;">暂无报警</p>';
+            ).join('');
+            if (sectionCollapsed.alert && alerts.length > 10) {
+                html += `<p style="color:#8b949e;font-size:0.8rem;text-align:center;margin-top:4px;">共 ${alerts.length} 条，仅显示前 10 条，点击“折叠/展开”查看全部</p>`;
+            }
+            el.innerHTML = html;
         }
 
         function refresh() {
