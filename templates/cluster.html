@@ -277,6 +277,10 @@
                     <input type="text" id="train-args" placeholder="--epochs 10">
                 </div>
                 <div class="form-group">
+                    <label>GPU 数量</label>
+                    <input type="number" id="train-gpu-count" value="1" min="1" max="8">
+                </div>
+                <div class="form-group">
                     <label>优先级(1-10)</label>
                     <input type="number" id="train-priority" value="5" min="1" max="10">
                 </div>
@@ -515,9 +519,16 @@
             const script = document.getElementById('train-script').value.trim();
             const args = document.getElementById('train-args').value.trim();
             const priority = document.getElementById('train-priority').value;
+            const gpuCount = parseInt(document.getElementById('train-gpu-count').value || '1', 10);
             const allowedServers = getTrainSelectedServers();
             if (!name || !script) { showMsg('err', '任务名和脚本路径必填'); return; }
-            const payload = { name, script_path: script, script_args: args, priority: parseInt(priority) };
+            const payload = {
+                name,
+                script_path: script,
+                script_args: args,
+                priority: parseInt(priority),
+                gpu_count: isNaN(gpuCount) || gpuCount < 1 ? 1 : gpuCount
+            };
             if (allowedServers.length > 0) payload.allowed_servers = allowedServers;
             const d = await api('/api/cluster/training/submit', {
                 method: 'POST',

@@ -121,11 +121,13 @@ class DatabaseManager:
                     error_message TEXT
                 )
             ''')
-            # 迁移：为训练任务表添加 allowed_servers（可选服务器白名单，空表示所有服务器）
+            # 迁移：为训练任务表添加 allowed_servers（可选服务器白名单，空表示所有服务器）和 gpu_count（所需 GPU 数）
             cursor.execute("PRAGMA table_info(training_tasks)")
             train_cols = [r[1] for r in cursor.fetchall()]
             if 'allowed_servers' not in train_cols:
                 cursor.execute("ALTER TABLE training_tasks ADD COLUMN allowed_servers TEXT DEFAULT ''")
+            if 'gpu_count' not in train_cols:
+                cursor.execute("ALTER TABLE training_tasks ADD COLUMN gpu_count INTEGER DEFAULT 1")
             
             # 测试任务表
             cursor.execute('''
@@ -478,16 +480,24 @@ class DatabaseManager:
             return False
     
     # ========== 训练任务 ==========
-    def add_training_task(self, name, script_path, script_args='', priority=5, allowed_servers=None):
-        """allowed_servers: 可选服务器名列表，空/None 表示所有服务器可用"""
+    def add_training_task(self, name, script_path, script_args='', priority=5, gpu_count=1, allowed_servers=None):
+        """allowed_servers: 可选服务器名列表，空/None 表示所有服务器可用；gpu_count: 任务需要的 GPU 数量"""
         try:
+            # 规范化 gpu_count
+            try:
+                gpu_count_int = int(gpu_count)
+            except (TypeError, ValueError):
+                gpu_count_int = 1
+            if gpu_count_int < 1:
+                gpu_count_int = 1
+
             allowed_str = json.dumps(allowed_servers or []) if allowed_servers is not None else '[]'
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO training_tasks (name, script_path, script_args, priority, allowed_servers, status)
-                    VALUES (?, ?, ?, ?, ?, 'pending')
-                ''', (name, script_path, script_args, priority, allowed_str))
+                    INSERT INTO training_tasks (name, script_path, script_args, priority, gpu_ids, status, log_path, weight_path, pid, created_at, started_at, finished_at, error_message, server_name, allowed_servers, gpu_count)
+                    VALUES (?, ?, ?, ?, NULL, 'pending', NULL, NULL, NULL, CURRENT_TIMESTAMP, NULL, NULL, NULL, NULL, ?, ?)
+                ''', (name, script_path, script_args, priority, allowed_str, gpu_count_int))
                 conn.commit()
                 return True, cursor.lastrowid
         except Exception as e:
@@ -495,7 +505,7 @@ class DatabaseManager:
     
     def update_training_task(self, task_id, **kwargs):
         try:
-            allowed = {'server_name', 'gpu_ids', 'status', 'log_path', 'weight_path', 'pid', 'started_at', 'finished_at', 'error_message', 'script_path'}
+            allowed = {'server_name', 'gpu_ids', 'status', 'log_path', 'weight_path', 'pid', 'started_at', 'finished_at', 'error_message', 'script_path', 'gpu_count'}
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 updates = []
@@ -543,17 +553,25 @@ class DatabaseManager:
     
     def _row_to_training_task(self, row):
         allowed = []
+        gpu_count = 1
+        # 目前 training_tasks 基础列为 15 个，之后按顺序追加 allowed_servers, gpu_count
         if len(row) > 15 and row[15]:
             try:
                 allowed = json.loads(row[15])
             except (TypeError, ValueError):
-                pass
+                allowed = []
+        if len(row) > 16 and row[16] is not None:
+            try:
+                gpu_count = int(row[16])
+            except (TypeError, ValueError):
+                gpu_count = 1
         return {
             'id': row[0], 'name': row[1], 'script_path': row[2], 'script_args': row[3] or '',
             'server_name': row[4], 'gpu_ids': row[5], 'priority': row[6], 'status': row[7],
             'log_path': row[8], 'weight_path': row[9], 'pid': row[10],
             'created_at': row[11], 'started_at': row[12], 'finished_at': row[13], 'error_message': row[14],
-            'allowed_servers': allowed
+            'allowed_servers': allowed,
+            'gpu_count': gpu_count
         }
     
     # ========== 测试任务 ==========

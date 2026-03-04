@@ -398,10 +398,21 @@ def cluster_task_scheduler():
             if not has_any_code_path:
                 time.sleep(15)
                 continue
-            # 训练任务调度（使用训练用阈值）
+            # 训练任务调度（使用训练用阈值，根据任务自己的 GPU 数量等待）
             for task in db.get_pending_training_tasks():
                 allowed = task.get('allowed_servers') or []
-                server, gpu_ids = find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowed_servers=allowed if allowed else None)
+                try:
+                    task_gpu_count = int(task.get('gpu_count') or 1)
+                except (TypeError, ValueError):
+                    task_gpu_count = 1
+                if task_gpu_count < 1:
+                    task_gpu_count = 1
+                server, gpu_ids = find_idle_server_and_gpus(
+                    gpu_count=task_gpu_count,
+                    reserved=0,
+                    task_type='train',
+                    allowed_servers=allowed if allowed else None
+                )
                 if server and gpu_ids:
                     ok, msg = run_training_on_server(task, server, gpu_ids)
                     if not ok:
@@ -1145,10 +1156,11 @@ def submit_training_task():
     script_path = data.get('script_path', '').strip()
     script_args = data.get('script_args', '')
     priority = int(data.get('priority', 5))
+    gpu_count = data.get('gpu_count', 1)
     allowed_servers = data.get('allowed_servers')  # 可选，服务器名列表；空/不传表示所有服务器
     if not name or not script_path:
         return jsonify({'success': False, 'error': '任务名和脚本路径必填'})
-    ok, result = db.add_training_task(name, script_path, script_args, priority, allowed_servers=allowed_servers)
+    ok, result = db.add_training_task(name, script_path, script_args, priority, gpu_count=gpu_count, allowed_servers=allowed_servers)
     if not ok:
         return jsonify({'success': False, 'error': str(result)})
     task_id = result
