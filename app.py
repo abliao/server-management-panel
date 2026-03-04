@@ -41,6 +41,9 @@ CONFIG_TRAIN_UTIL_THRESHOLD = 'train_gpu_util_threshold'
 CONFIG_TEST_MEM_THRESHOLD = 'test_gpu_mem_threshold'
 CONFIG_TEST_UTIL_THRESHOLD = 'test_gpu_util_threshold'
 CONFIG_RESERVED_GPU = 'reserved_gpu_count'
+# 训练/测试使用的 Conda 环境（可选）
+CONFIG_TRAIN_CONDA_ENV = 'train_conda_env'
+CONFIG_TEST_CONDA_ENV = 'test_conda_env'
 
 # 验证管理员权限的装饰器
 def require_admin(f):
@@ -261,13 +264,17 @@ def find_available_port_on_server(server, base=18000):
 
 
 def run_training_on_server(task, server, gpu_ids):
-    """在指定服务器上启动训练任务"""
+    """在指定服务器上启动训练任务（支持 .sh 与 .py）"""
     code_path = server.get('code_path') or db.get_config(CONFIG_CODE_PATH, '/home')
     script = task['script_path']
     args = task.get('script_args') or ''
     gpu_str = ','.join(map(str, gpu_ids))
     log_path = f"/tmp/train_{task['id']}_{int(time.time())}.log"
-    cmd = f'CUDA_VISIBLE_DEVICES={gpu_str} nohup python {script} {args} > {log_path} 2>&1 & echo $!'
+    runner = 'bash' if script.lower().endswith('.sh') else 'python'
+    # 可选：激活训练用 Conda 环境（依赖于 ~/.bashrc 中的 conda 初始化）
+    train_env = (db.get_config(CONFIG_TRAIN_CONDA_ENV, '') or '').strip()
+    conda_prefix = f'conda activate {train_env} && ' if train_env else ''
+    cmd = f'{conda_prefix}CUDA_VISIBLE_DEVICES={gpu_str} nohup {runner} {script} {args} > {log_path} 2>&1 & echo $!'
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
         return False, out
@@ -290,7 +297,10 @@ def run_test_on_server(task, server, gpu_ids, port):
     log_path = f"/tmp/test_{task['id']}_{int(time.time())}.log"
     # 假设测试脚本接受 --port 和 --weight 等参数
     extra = f'--port {port} --weight {weight}' if weight else f'--port {port}'
-    cmd = f'{env} nohup python {script} {args} {extra} > {log_path} 2>&1 & echo $!'
+    # 可选：激活测试用 Conda 环境
+    test_env = (db.get_config(CONFIG_TEST_CONDA_ENV, '') or '').strip()
+    conda_prefix = f'conda activate {test_env} && ' if test_env else ''
+    cmd = f'{conda_prefix}{env} nohup python {script} {args} {extra} > {log_path} 2>&1 & echo $!'
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
         return False, out
@@ -1032,6 +1042,8 @@ def get_cluster_config():
             'test_gpu_mem_threshold': db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, '20'),
             'test_gpu_util_threshold': db.get_config(CONFIG_TEST_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, '15'),
             'reserved_gpu_count': db.get_config(CONFIG_RESERVED_GPU, '0'),
+            'train_conda_env': db.get_config(CONFIG_TRAIN_CONDA_ENV, '') or '',
+            'test_conda_env': db.get_config(CONFIG_TEST_CONDA_ENV, '') or '',
         }
     })
 
@@ -1042,7 +1054,7 @@ def set_cluster_config():
     data = request.get_json() or {}
     keys = [CONFIG_CODE_PATH, CONFIG_DATA_PATH, CONFIG_MEM_THRESHOLD, CONFIG_UTIL_THRESHOLD,
             CONFIG_TRAIN_MEM_THRESHOLD, CONFIG_TRAIN_UTIL_THRESHOLD, CONFIG_TEST_MEM_THRESHOLD, CONFIG_TEST_UTIL_THRESHOLD,
-            CONFIG_RESERVED_GPU]
+            CONFIG_RESERVED_GPU, CONFIG_TRAIN_CONDA_ENV, CONFIG_TEST_CONDA_ENV]
     for k in keys:
         if k in data:
             db.set_config(k, str(data[k]))
