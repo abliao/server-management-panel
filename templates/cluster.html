@@ -494,7 +494,11 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h3 id="log-modal-title">训练日志</h3>
-                <button class="modal-close" onclick="closeLogModal()">&times;</button>
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <button id="log-mode-full-btn" class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="reloadCurrentLog('full')">全部</button>
+                    <button id="log-mode-tail-btn" class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="reloadCurrentLog('tail100')">最近100行</button>
+                    <button class="modal-close" onclick="closeLogModal()">&times;</button>
+                </div>
             </div>
             <div id="log-content" class="log-viewer">加载中...</div>
         </div>
@@ -505,6 +509,7 @@
         const DEPLOY_FORM_KEY = 'cluster_last_deploy_form';
         const TEST_FORM_KEY = 'cluster_last_test_form';
         let deployTaskCache = [];
+        let currentLogMeta = null;
 
         function showMsg(type, text) {
             const el = document.getElementById('msg');
@@ -997,42 +1002,55 @@
             else showMsg('err', d.error);
         }
 
-        async function viewLog(id) {
-            document.getElementById('log-modal-title').textContent = '训练日志';
+        function setLogModeButtons(mode) {
+            const fullBtn = document.getElementById('log-mode-full-btn');
+            const tailBtn = document.getElementById('log-mode-tail-btn');
+            if (!fullBtn || !tailBtn) return;
+            fullBtn.style.opacity = mode === 'full' ? '1' : '0.7';
+            tailBtn.style.opacity = mode === 'tail100' ? '1' : '0.7';
+        }
+
+        async function openLogModal(title, pathBase, id, mode = 'tail100') {
+            currentLogMeta = { title, pathBase, id, mode };
+            document.getElementById('log-modal-title').textContent = title;
             document.getElementById('log-modal').classList.add('show');
             document.getElementById('log-content').textContent = '加载中...';
-            const r = await fetch('/api/cluster/training/' + id + '/log');
+            setLogModeButtons(mode);
+            const query = mode === 'tail100' ? '?lines=100' : '';
+            const r = await fetch(pathBase + id + '/log' + query);
             const text = await r.text();
             document.getElementById('log-content').textContent = text || '(空)';
+        }
+
+        async function reloadCurrentLog(mode) {
+            if (!currentLogMeta) return;
+            await openLogModal(currentLogMeta.title, currentLogMeta.pathBase, currentLogMeta.id, mode);
+        }
+
+        async function viewLog(id) {
+            await openLogModal('训练日志', '/api/cluster/training/', id, 'tail100');
         }
 
         async function viewDeployLog(id) {
-            document.getElementById('log-modal-title').textContent = '部署日志';
-            document.getElementById('log-modal').classList.add('show');
-            document.getElementById('log-content').textContent = '加载中...';
-            const r = await fetch('/api/cluster/deploy/' + id + '/log');
-            const text = await r.text();
-            document.getElementById('log-content').textContent = text || '(空)';
+            await openLogModal('部署日志', '/api/cluster/deploy/', id, 'tail100');
         }
 
         async function viewTestLog(id) {
-            document.getElementById('log-modal-title').textContent = '测试日志';
-            document.getElementById('log-modal').classList.add('show');
-            document.getElementById('log-content').textContent = '加载中...';
-            const r = await fetch('/api/cluster/test/' + id + '/log');
-            const text = await r.text();
-            document.getElementById('log-content').textContent = text || '(空)';
+            await openLogModal('测试日志', '/api/cluster/test/', id, 'tail100');
         }
 
         function showPathDetail(label, encodedPath) {
+            currentLogMeta = null;
             const fullPath = decodeURIComponent(encodedPath || '');
             document.getElementById('log-modal-title').textContent = label || '路径详情';
             document.getElementById('log-modal').classList.add('show');
             document.getElementById('log-content').textContent = fullPath || '(空)';
+            setLogModeButtons('full');
         }
 
         function closeLogModal() {
             document.getElementById('log-modal').classList.remove('show');
+            currentLogMeta = null;
         }
 
         async function killTrain(id) {

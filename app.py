@@ -436,6 +436,26 @@ def extract_save_folder_from_output(output_text):
     return raw
 
 
+def _read_remote_log_with_limit(server, log_path, lines=None):
+    """读取远程日志；lines 为正整数时仅返回最后 N 行。"""
+    path = str(log_path or '').strip()
+    if not path:
+        return False, '日志路径为空'
+    qpath = shlex.quote(path)
+
+    n = None
+    if lines is not None:
+        try:
+            n = int(lines)
+        except (TypeError, ValueError):
+            n = None
+    if n is not None and n > 0:
+        cmd = f'if [ -f {qpath} ]; then tail -n {n} {qpath}; else echo "(日志文件不存在)"; fi'
+    else:
+        cmd = f'if [ -f {qpath} ]; then cat {qpath}; else echo "(日志文件不存在)"; fi'
+    return execute_ssh_command_silent(server, cmd)
+
+
 def is_remote_pid_alive(server, pid, timeout=12):
     """检查远程 PID 是否仍存活：True=存活，False=不存在，None=检查失败。"""
     try:
@@ -572,7 +592,7 @@ def run_test_on_server(task, server, gpu_ids, port):
         port=port,
         log_path=log_path
     )
-    extra_parts = [f'--port {int(port)}']
+    extra_parts = [f'']
     if mock_url:
         extra_parts.append(f'--url {shlex.quote(str(mock_url))}')
     if mock_task_name:
@@ -716,13 +736,10 @@ def cluster_task_scheduler():
                 fixed_server_name = (task.get('server_name') or '').strip()
                 server = db.get_server_by_name(fixed_server_name) if fixed_server_name else None
                 gpu_ids = []
-                if server:
-                    # 方案一：优先使用 URL 中的端口；无端口时再自动分配
-                    port = extract_port_from_url(task.get('mock_url') or '') or find_available_port_on_server(server)
+                if server: 
+                    port = extract_port_from_url(task.get('mock_url'))
                     if port:
                         ok, msg = run_test_on_server(task, server, gpu_ids, port)
-                        if not ok:
-                            db.update_test_task(task['id'], status='failed', result=str(msg))
                     else:
                         db.update_test_task(task['id'], status='failed', result='未找到可用端口')
                     time.sleep(2)
@@ -1489,13 +1506,13 @@ def get_training_log(task_id):
     if not server:
         return jsonify({'success': False, 'error': '服务器不存在'})
     log_path = task['log_path']
+    lines = request.args.get('lines', type=int)
     # 先在内容前面标注日志路径，方便排查
     prefix = f'[日志路径] {log_path}\\n\\n'
-    # 远程读取日志文件；不存在时给出提示
-    ok, content = execute_ssh_command_silent(
-        server,
-        f'if [ -f "{log_path}" ]; then cat "{log_path}"; else echo "(日志文件不存在)"; fi'
-    )
+    if lines and lines > 0:
+        prefix += f'[显示模式] 最近 {lines} 行\\n\\n'
+    # 远程读取日志文件；可按行数截取尾部
+    ok, content = _read_remote_log_with_limit(server, log_path, lines=lines)
     if not ok:
         return jsonify({'success': False, 'error': content})
     return Response(prefix + (content or ''), mimetype='text/plain; charset=utf-8')
@@ -1613,11 +1630,11 @@ def get_deploy_log(task_id):
     if not server:
         return jsonify({'success': False, 'error': '服务器不存在'})
     log_path = task['log_path']
+    lines = request.args.get('lines', type=int)
     prefix = f'[日志路径] {log_path}\\n\\n'
-    ok, content = execute_ssh_command_silent(
-        server,
-        f'if [ -f "{log_path}" ]; then cat "{log_path}"; else echo "(日志文件不存在)"; fi'
-    )
+    if lines and lines > 0:
+        prefix += f'[显示模式] 最近 {lines} 行\\n\\n'
+    ok, content = _read_remote_log_with_limit(server, log_path, lines=lines)
     if not ok:
         return jsonify({'success': False, 'error': content})
     return Response(prefix + (content or ''), mimetype='text/plain; charset=utf-8')
@@ -1771,11 +1788,11 @@ def get_test_log(task_id):
     if not server:
         return jsonify({'success': False, 'error': '服务器不存在'})
     log_path = task['log_path']
+    lines = request.args.get('lines', type=int)
     prefix = f'[日志路径] {log_path}\\n\\n'
-    ok, content = execute_ssh_command_silent(
-        server,
-        f'if [ -f "{log_path}" ]; then cat "{log_path}"; else echo "(日志文件不存在)"; fi'
-    )
+    if lines and lines > 0:
+        prefix += f'[显示模式] 最近 {lines} 行\\n\\n'
+    ok, content = _read_remote_log_with_limit(server, log_path, lines=lines)
     if not ok:
         return jsonify({'success': False, 'error': content})
     return Response(prefix + (content or ''), mimetype='text/plain; charset=utf-8')
