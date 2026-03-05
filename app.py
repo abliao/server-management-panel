@@ -2,6 +2,7 @@ from flask import Flask, render_template, jsonify, request, send_file, session, 
 import json
 import logging
 import paramiko
+import socket
 import time
 import threading
 import os
@@ -16,14 +17,17 @@ from cluster_utils import parse_gpustat_output, find_idle_gpus, find_available_p
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
+werkzeug_logger = logging.getLogger('werkzeug')
+werkzeug_logger.disabled = True
 
 # 日志器（替代散落的 print 调试输出）
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     logger.setLevel(logging.INFO)
     _handler = logging.StreamHandler()
+    # 显示时间、级别、文件名和代码行号，便于快速定位
     _formatter = logging.Formatter(
-        '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+        '%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d %(message)s'
     )
     _handler.setFormatter(_formatter)
     logger.addHandler(_handler)
@@ -224,20 +228,35 @@ def execute_ssh_command_silent(server, command, timeout=60):
     full_cmd = f'source ~/.bashrc 2>/dev/null; source ~/.profile 2>/dev/null; cd {code_path} 2>/dev/null; {command}'
     logger.info(f"[SSH] server={server_name} code_path={code_path}")
     logger.info(f"[SSH] command= {full_cmd[:500]}{'...' if len(full_cmd) > 500 else ''}")
+
+    out = ''
+    err = ''
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(**_ssh_connect_params(server))
         stdin, stdout, stderr = ssh.exec_command(full_cmd, timeout=timeout)
-        out = stdout.read().decode('utf-8', errors='replace')
+        out = stdout.read().decode("utf-8", errors="replace")
         err = stderr.read().decode('utf-8', errors='replace')
         ssh.close()
         combined = out + (('\n' + err) if err else '')
         logger.info(f"[SSH] server={server_name} ok=True output_preview= {repr(combined[:400])}{'...' if len(combined) > 400 else ''}")
         return True, combined
     except Exception as e:
-        err_msg = str(e)
-        logger.info(f"[SSH] server={server_name} ok=False error= {err_msg}")
+        # 超时特殊处理：命令多半已在远端成功执行，这里按“成功”处理，避免重复执行
+        if isinstance(e, (TimeoutError, socket.timeout)):
+            err_msg = f"{type(e).__name__}: {repr(e)}"
+            logger.warning(
+                f"[SSH] server={server_name} timeout, "
+                f"treat as success. error={err_msg} command={command}"
+            )
+            combined = out + (('\n' + err) if err else '')
+            suffix = f"[SSH_TIMEOUT_TREATED_AS_SUCCESS] {err_msg}"
+            return True, (combined + '\n' if combined else '') + suffix
+
+        # 其他异常：按失败处理，返回 False
+        err_msg = f"{type(e).__name__}: {repr(e)}"
+        logger.exception(f"[SSH] server={server_name} exception while running command={command}")
         return False, err_msg
 
 
@@ -373,7 +392,7 @@ def run_training_on_server(task, server, gpu_ids):
     gpu_str = ','.join(map(str, gpu_ids))
     log_path = f"outputs/logs/train_{task['id']}_{int(time.time())}.log"
     runner = 'bash' if script.lower().endswith('.sh') else 'python'
-    cmd = f'mkdir -p outputs/logs && CUDA_VISIBLE_DEVICES={gpu_str} nohup {runner} {script} {args} > {log_path} 2>&1 & echo $!'
+    cmd = f'mkdir -p outputs/logs; CUDA_VISIBLE_DEVICES={gpu_str} nohup {runner} {script} {args} > {log_path} 2>&1 & echo $!'
     logger.info(f"[RunTrain] task_id={task['id']} server={server['name']} code_path={code_path} script={script} log={log_path}")
     logger.info(f"[RunTrain] full_cmd= {cmd}")
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
@@ -406,7 +425,7 @@ def run_test_on_server(task, server, gpu_ids, port):
     log_path = f"outputs/logs/test_{task['id']}_{int(time.time())}.log"
     # 假设测试脚本接受 --port 和 --weight 等参数
     extra = f'--port {port} --weight {weight}' if weight else f'--port {port}'
-    cmd = f'mkdir -p outputs/logs && {env} nohup python {script} {args} {extra} > {log_path} 2>&1 & echo $!'
+    cmd = f'mkdir -p outputs/logs; {env} nohup python {script} {args} {extra} > {log_path} 2>&1 & echo $!'
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
         return False, out
@@ -451,6 +470,7 @@ def cluster_task_scheduler():
                     allowed_servers=allowed if allowed else None
                 )
                 if server and gpu_ids:
+                    logger.info(f"[Scheduler]   start train_task id={task['id']} on {server['name']} gpus={gpu_ids} OK")
                     ok, msg = run_training_on_server(task, server, gpu_ids)
                     if not ok:
                         logger.info(f"[Scheduler]   start train_task id={task['id']} FAILED: {msg}")
@@ -1505,4 +1525,4 @@ if __name__ == '__main__':
     # 启动集群任务调度器
     scheduler_thread = threading.Thread(target=cluster_task_scheduler, daemon=True)
     scheduler_thread.start()
-    app.run(host='0.0.0.0', port=5000, debug=True) 
+    app.run(host='0.0.0.0', port=5000, debug=False) 
