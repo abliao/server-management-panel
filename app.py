@@ -352,10 +352,10 @@ def get_used_ports_on_server(server):
 
 def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowed_servers=None):
     """在集群中找一台有空闲 GPU 的服务器，返回 (server, [gpu_ids]) 或 (None, [])
-    task_type: 'train' 用训练阈值(显存/算力要求高)，'test' 用测试阈值(要求较低)
+    task_type: 'train' 用训练阈值(显存/算力要求高)，'deploy' 用部署阈值(原测试阈值)
     allowed_servers: 可选，服务器名列表；为空或 None 时考虑所有服务器
     """
-    if task_type == 'test':
+    if task_type in ('deploy', 'test'):
         mem_th = int(db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
         util_th = int(db.get_config(CONFIG_TEST_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
     else:
@@ -380,9 +380,46 @@ def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowe
     return None, []
 
 
+def find_available_server(allowed_servers=None):
+    """找一台可用服务器（不依赖 GPU）。"""
+    servers = load_servers()
+    if allowed_servers:
+        allow_set = set(s.strip() for s in allowed_servers if s and str(s).strip())
+        servers = [s for s in servers if s['name'] in allow_set]
+    if not servers:
+        return None
+
+    # 优先挑当前状态看起来连接正常的服务器
+    for srv in servers:
+        st = server_status.get(srv['name'], {}) or {}
+        gpu_text = (st.get('gpu_status') or '').strip()
+        if not gpu_text:
+            return srv
+        if 'Connection Error' in gpu_text or gpu_text.startswith('Error:') or gpu_text == 'Loading...':
+            continue
+        return srv
+    return servers[0]
+
+
 def find_available_port_on_server(server, base=18000):
     used = get_used_ports_on_server(server)
     return find_available_port(used, base_port=base)
+
+
+def extract_port_from_url(url):
+    """从 URL 里提取端口，提取失败返回 None。"""
+    if not url:
+        return None
+    m = re.search(r':(\d+)(?:/|$)', str(url).strip())
+    if not m:
+        return None
+    try:
+        p = int(m.group(1))
+        if 1 <= p <= 65535:
+            return p
+    except (TypeError, ValueError):
+        return None
+    return None
 
 
 def extract_save_folder_from_output(output_text):
@@ -399,13 +436,79 @@ def extract_save_folder_from_output(output_text):
     return raw
 
 
+def is_remote_pid_alive(server, pid, timeout=12):
+    """检查远程 PID 是否仍存活：True=存活，False=不存在，None=检查失败。"""
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid_int <= 0:
+        return False
+
+    check_cmd = f'ps -p {pid_int} -o pid= 2>/dev/null | tr -d "[:space:]"'
+    ok, out = execute_ssh_command_silent(server, check_cmd, timeout=timeout)
+    if not ok:
+        return None
+    return (out or '').strip() == str(pid_int)
+
+
+def reconcile_running_tasks():
+    """巡检 running 任务，若远程 PID 已结束则自动置为 done。"""
+    now = datetime.now(CST).isoformat()
+
+    for task in db.get_running_training_tasks():
+        server_name = (task.get('server_name') or '').strip()
+        pid = task.get('pid')
+        if not server_name or not pid:
+            continue
+        server = db.get_server_by_name(server_name)
+        if not server:
+            continue
+        alive = is_remote_pid_alive(server, pid)
+        if alive is False:
+            db.update_training_task(task['id'], status='done', finished_at=now, pid=None)
+            logger.info(f"[Health] training task_id={task['id']} pid={pid} ended -> done")
+        elif alive is None:
+            logger.info(f"[Health] training task_id={task['id']} pid={pid} check failed, keep running")
+
+    for task in db.get_running_deploy_tasks():
+        server_name = (task.get('server_name') or '').strip()
+        pid = task.get('pid')
+        if not server_name or not pid:
+            continue
+        server = db.get_server_by_name(server_name)
+        if not server:
+            continue
+        alive = is_remote_pid_alive(server, pid)
+        if alive is False:
+            db.update_deploy_task(task['id'], status='done', finished_at=now, pid=None)
+            logger.info(f"[Health] deploy task_id={task['id']} pid={pid} ended -> done")
+        elif alive is None:
+            logger.info(f"[Health] deploy task_id={task['id']} pid={pid} check failed, keep running")
+
+    for task in db.get_running_test_tasks():
+        server_name = (task.get('server_name') or '').strip()
+        pid = task.get('pid')
+        if not server_name or not pid:
+            continue
+        server = db.get_server_by_name(server_name)
+        if not server:
+            continue
+        alive = is_remote_pid_alive(server, pid)
+        if alive is False:
+            db.update_test_task(task['id'], status='done', finished_at=now, pid=None)
+            logger.info(f"[Health] test task_id={task['id']} pid={pid} ended -> done")
+        elif alive is None:
+            logger.info(f"[Health] test task_id={task['id']} pid={pid} check failed, keep running")
+
+
 def run_training_on_server(task, server, gpu_ids):
     """在指定服务器上启动训练任务（支持 .sh 与 .py）"""
     code_path = server.get('code_path') or db.get_config(CONFIG_CODE_PATH, '/home')
     script = task['script_path']
     args = task.get('script_args') or ''
     gpu_str = ','.join(map(str, gpu_ids))
-    log_path = f"outputs/logs/train_{task['id']}_{int(time.time())}.log"
+    log_path = f"{str(code_path).rstrip('/')}/outputs/logs/train_{task['id']}_{int(time.time())}.log"
     runner = 'bash' if script.lower().endswith('.sh') else 'python'
     cmd = f'mkdir -p outputs/logs; CUDA_VISIBLE_DEVICES={gpu_str} nohup {runner} {script} {args} > {log_path} 2>&1 & echo $!'
     logger.info(f"[RunTrain] task_id={task['id']} server={server['name']} code_path={code_path} script={script} log={log_path}")
@@ -427,7 +530,6 @@ def run_training_on_server(task, server, gpu_ids):
                             status='running', log_path=log_path, pid=pid,
                             started_at=datetime.now(CST).isoformat())
 
-    print('out',out)
     # 启动成功后，仅从返回文本中提取 save_folder 并记录权重路径
     try:
         if not (task.get('weight_path') or '').strip():
@@ -460,7 +562,16 @@ def run_test_on_server(task, server, gpu_ids, port):
     run_id = task.get('run_id') or ''
     gpu_str = ','.join(map(str, gpu_ids)) if gpu_ids else ''
     env = f'CUDA_VISIBLE_DEVICES={gpu_str}' if gpu_str else ''
-    log_path = f"outputs/logs/test_{task['id']}_{int(time.time())}.log"
+    log_path = f"{str(code_path).rstrip('/')}/outputs/logs/test_{task['id']}_{int(time.time())}.log"
+    runner = 'bash' if script.lower().endswith('.sh') else 'python'
+    # 先记录日志路径，保证即使启动失败也能在列表里查看日志
+    db.update_test_task(
+        task['id'],
+        server_name=server['name'],
+        gpu_ids=','.join(map(str, gpu_ids)) if gpu_ids else '',
+        port=port,
+        log_path=log_path
+    )
     extra_parts = [f'--port {int(port)}']
     if mock_url:
         extra_parts.append(f'--url {shlex.quote(str(mock_url))}')
@@ -471,11 +582,12 @@ def run_test_on_server(task, server, gpu_ids, port):
             extra_parts.append(f'--user_token {shlex.quote(str(user_token))}')
         if run_id:
             extra_parts.append(f'--run_id {shlex.quote(str(run_id))}')
+    extra_parts.append(f'--test_type {task_type}')
     extra = ' '.join(extra_parts)
     cmd = (
         f'mkdir -p outputs/logs; '
         f'cd {shlex.quote(str(test_code_path))} 2>/dev/null; '
-        f'{env} nohup python {script} {args} {extra} > {log_path} 2>&1 & echo $!'
+        f'{env} nohup {runner} {script} {args} {extra} > {log_path} 2>&1 & echo $!'
     )
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
@@ -490,18 +602,19 @@ def run_test_on_server(task, server, gpu_ids, port):
         return False, f'启动测试失败，未获取到有效 PID，输出: {out}'
     pid = int(pid_match.group(1))
     db.update_test_task(task['id'], server_name=server['name'], gpu_ids=','.join(map(str, gpu_ids)) if gpu_ids else '',
-                        port=port, status='running', pid=pid, started_at=datetime.now(CST).isoformat())
+                        port=port, status='running', pid=pid, log_path=log_path, started_at=datetime.now(CST).isoformat())
     return True, {'pid': pid, 'port': port, 'log_path': log_path}
 
 
 def run_deploy_on_server(task, server, gpu_ids):
     """在指定服务器上启动部署任务（支持 .sh 与 .py）"""
+    code_path = server.get('code_path') or db.get_config(CONFIG_CODE_PATH, '/home')
     script = task.get('script_path') or ''
     weight = task.get('weight_path') or ''
     port = task.get('port')
     gpu_str = ','.join(map(str, gpu_ids)) if gpu_ids else ''
     env = f'CUDA_VISIBLE_DEVICES={gpu_str}' if gpu_str else ''
-    log_path = f"outputs/logs/deploy_{task['id']}_{int(time.time())}.log"
+    log_path = f"{str(code_path).rstrip('/')}/outputs/logs/deploy_{task['id']}_{int(time.time())}.log"
     runner = 'bash' if script.lower().endswith('.sh') else 'python'
     weight_arg = f' --weight {weight}' if weight else ''
     port_arg = f' --port {port}' if port not in (None, '') else ''
@@ -536,6 +649,9 @@ def cluster_task_scheduler():
     """后台调度：处理待执行的训练和测试任务"""
     while True:
         try:
+            # 先巡检 running 任务，避免进程结束后状态长期停留在 running
+            reconcile_running_tasks()
+
             # 至少有一台服务器配置了 code_path 才调度
             servers = load_servers()
             has_any_code_path = any(s.get('code_path') for s in servers) or db.get_config(CONFIG_CODE_PATH)
@@ -568,20 +684,20 @@ def cluster_task_scheduler():
                         logger.info(f"[Scheduler]   start train_task id={task['id']} on {server['name']} gpus={gpu_ids} OK")
                     time.sleep(2)  # 避免连续提交过快
 
-            # 部署任务调度（优先尝试 1 张 GPU，若没有则无 GPU 启动）
+            # 部署任务调度（使用部署阈值找 GPU）
             for task in db.get_pending_deploy_tasks():
                 allowed = task.get('allowed_servers') or []
                 server, gpu_ids = find_idle_server_and_gpus(
                     gpu_count=1,
                     reserved=0,
-                    task_type='test',
+                    task_type='deploy',
                     allowed_servers=allowed if allowed else None
                 )
                 if not server:
                     server, gpu_ids = find_idle_server_and_gpus(
                         gpu_count=0,
                         reserved=0,
-                        task_type='test',
+                        task_type='deploy',
                         allowed_servers=allowed if allowed else None
                     )
                     gpu_ids = []
@@ -595,18 +711,23 @@ def cluster_task_scheduler():
                         logger.info(f"[Scheduler]   start deploy_task id={task['id']} on {server['name']} OK")
                     time.sleep(2)
 
-            # 测试任务调度（使用测试用阈值，测试对显存/算力要求较低）
+            # 测试任务调度（不依赖 GPU）
             for task in db.get_pending_test_tasks():
-                server, gpu_ids = find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='test')
-                if not server:
-                    server, gpu_ids = find_idle_server_and_gpus(gpu_count=0, reserved=0, task_type='test')
-                    gpu_ids = []
+                fixed_server_name = (task.get('server_name') or '').strip()
+                server = db.get_server_by_name(fixed_server_name) if fixed_server_name else None
+                gpu_ids = []
                 if server:
-                    port = find_available_port_on_server(server)
+                    # 方案一：优先使用 URL 中的端口；无端口时再自动分配
+                    port = extract_port_from_url(task.get('mock_url') or '') or find_available_port_on_server(server)
                     if port:
                         ok, msg = run_test_on_server(task, server, gpu_ids, port)
                         if not ok:
                             db.update_test_task(task['id'], status='failed', result=str(msg))
+                    else:
+                        db.update_test_task(task['id'], status='failed', result='未找到可用端口')
+                    time.sleep(2)
+                else:
+                    db.update_test_task(task['id'], status='failed', result='指定服务器不存在')
                     time.sleep(2)
         except Exception as e:
             logger.info(f"[Scheduler] Error: {e}")
@@ -1566,6 +1687,7 @@ def submit_test_task():
     data = request.get_json() or {}
     name = data.get('name', '').strip()
     task_type = data.get('task_type', 'mock')  # mock 或 real
+    server_name = data.get('server_name', '').strip()
     script_path = data.get('script_path', '')
     script_args = data.get('script_args', '')
     test_code_path = data.get('test_code_path', '').strip()
@@ -1573,11 +1695,35 @@ def submit_test_task():
     mock_task_name = data.get('mock_task_name', '').strip()
     user_token = data.get('user_token', '').strip()
     run_id = data.get('run_id', '').strip()
+    deploy_task_id_raw = data.get('deploy_task_id')
+    deploy_task_id = None
+    if deploy_task_id_raw not in (None, ''):
+        try:
+            deploy_task_id = int(deploy_task_id_raw)
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': '部署任务ID格式错误'})
     training_task_id = data.get('training_task_id')
+
+    # 选择了部署任务ID时，自动回填服务器、task_name、url
+    if deploy_task_id is not None:
+        deploy_task = db.get_deploy_task(deploy_task_id)
+        if not deploy_task:
+            return jsonify({'success': False, 'error': '指定部署任务不存在'})
+        if deploy_task.get('server_name'):
+            server_name = (deploy_task.get('server_name') or '').strip()
+        if deploy_task.get('name'):
+            mock_task_name = (deploy_task.get('name') or '').strip()
+        if deploy_task.get('port'):
+            mock_url = f"http://127.0.0.1:{int(deploy_task.get('port'))}"
+
     if not name:
         return jsonify({'success': False, 'error': '任务名必填'})
     if task_type not in ('mock', 'real'):
         return jsonify({'success': False, 'error': 'task_type 须为 mock 或 real'})
+    if not server_name:
+        return jsonify({'success': False, 'error': '测试服务器必填'})
+    if not db.get_server_by_name(server_name):
+        return jsonify({'success': False, 'error': '指定测试服务器不存在'})
     if not script_path:
         return jsonify({'success': False, 'error': '脚本路径必填'})
     if not test_code_path:
@@ -1591,6 +1737,7 @@ def submit_test_task():
     ok, result = db.add_test_task(
         name=name,
         task_type=task_type,
+        server_name=server_name,
         script_path=script_path,
         script_args=script_args,
         training_task_id=training_task_id,
@@ -1598,7 +1745,8 @@ def submit_test_task():
         mock_url=mock_url,
         mock_task_name=mock_task_name,
         user_token=user_token,
-        run_id=run_id
+        run_id=run_id,
+        deploy_task_id=deploy_task_id
     )
     if ok:
         return jsonify({'success': True, 'task_id': result})
@@ -1611,6 +1759,26 @@ def list_test_tasks():
     limit = request.args.get('limit', 100, type=int)
     tasks = db.get_all_test_tasks(limit=limit)
     return jsonify({'success': True, 'tasks': tasks})
+
+
+@app.route('/api/cluster/test/<int:task_id>/log')
+@require_admin
+def get_test_log(task_id):
+    task = db.get_test_task(task_id)
+    if not task or not task.get('server_name') or not task.get('log_path'):
+        return jsonify({'success': False, 'error': '任务或日志不存在'})
+    server = db.get_server_by_name(task['server_name'])
+    if not server:
+        return jsonify({'success': False, 'error': '服务器不存在'})
+    log_path = task['log_path']
+    prefix = f'[日志路径] {log_path}\\n\\n'
+    ok, content = execute_ssh_command_silent(
+        server,
+        f'if [ -f "{log_path}" ]; then cat "{log_path}"; else echo "(日志文件不存在)"; fi'
+    )
+    if not ok:
+        return jsonify({'success': False, 'error': content})
+    return Response(prefix + (content or ''), mimetype='text/plain; charset=utf-8')
 
 
 @app.route('/api/cluster/test/<int:task_id>/kill', methods=['POST'])
@@ -1722,23 +1890,24 @@ def list_alerts():
 @app.route('/api/cluster/servers/idle-gpus')
 @require_admin
 def get_idle_gpus():
-    """获取各服务器空闲 GPU 信息（分别展示训练用、测试用空闲卡）"""
+    """获取各服务器空闲 GPU 信息（分别展示训练用、部署用空闲卡）"""
     train_mem = int(db.get_config(CONFIG_TRAIN_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
     train_util = int(db.get_config(CONFIG_TRAIN_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
-    test_mem = int(db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
-    test_util = int(db.get_config(CONFIG_TEST_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
+    deploy_mem = int(db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
+    deploy_util = int(db.get_config(CONFIG_TEST_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
     result = []
     for srv_name, st in server_status.items():
         gpu_text = st.get('gpu_status', '') or ''
         is_error = 'Connection Error' in gpu_text or gpu_text.strip().startswith('Error:') or 'Loading...' in gpu_text
         gpus = parse_gpustat_output(gpu_text)
         train_idle = find_idle_gpus(gpu_text, train_mem, train_util)
-        test_idle = find_idle_gpus(gpu_text, test_mem, test_util)
+        deploy_idle = find_idle_gpus(gpu_text, deploy_mem, deploy_util)
         result.append({
             'server': srv_name,
-            'idle_gpus': test_idle,
+            'idle_gpus': deploy_idle,
             'train_idle_gpus': train_idle,
-            'test_idle_gpus': test_idle,
+            'deploy_idle_gpus': deploy_idle,
+            'test_idle_gpus': deploy_idle,  # 兼容旧前端字段
             'total_gpus': len(gpus),
             'gpus': gpus,
             'connection_error': is_error,

@@ -153,6 +153,7 @@ class DatabaseManager:
                     mock_task_name TEXT,
                     user_token TEXT,
                     run_id TEXT,
+                    deploy_task_id INTEGER,
                     FOREIGN KEY (training_task_id) REFERENCES training_tasks(id)
                 )
             ''')
@@ -169,6 +170,10 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE test_tasks ADD COLUMN user_token TEXT DEFAULT ''")
             if 'run_id' not in test_cols:
                 cursor.execute("ALTER TABLE test_tasks ADD COLUMN run_id TEXT DEFAULT ''")
+            if 'deploy_task_id' not in test_cols:
+                cursor.execute("ALTER TABLE test_tasks ADD COLUMN deploy_task_id INTEGER")
+            if 'log_path' not in test_cols:
+                cursor.execute("ALTER TABLE test_tasks ADD COLUMN log_path TEXT DEFAULT ''")
 
             # 部署任务表
             cursor.execute('''
@@ -576,6 +581,19 @@ class DatabaseManager:
                 return [self._row_to_training_task(row) for row in cursor.fetchall()]
         except Exception:
             return []
+
+    def get_running_training_tasks(self):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT * FROM training_tasks
+                    WHERE status="running" AND pid IS NOT NULL AND TRIM(CAST(pid AS TEXT)) <> ''
+                    ORDER BY started_at ASC, id ASC
+                ''')
+                return [self._row_to_training_task(row) for row in cursor.fetchall()]
+        except Exception:
+            return []
     
     def get_training_task(self, task_id):
         try:
@@ -631,19 +649,19 @@ class DatabaseManager:
         }
     
     # ========== 测试任务 ==========
-    def add_test_task(self, name, task_type, script_path='', script_args='', training_task_id=None,
-                      test_code_path='', mock_url='', mock_task_name='', user_token='', run_id=''):
+    def add_test_task(self, name, task_type, server_name='', script_path='', script_args='', training_task_id=None,
+                      test_code_path='', mock_url='', mock_task_name='', user_token='', run_id='', deploy_task_id=None):
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO test_tasks (
-                        name, task_type, script_path, script_args, training_task_id, status,
-                        test_code_path, mock_url, mock_task_name, user_token, run_id
+                        name, task_type, server_name, script_path, script_args, training_task_id, status,
+                        test_code_path, mock_url, mock_task_name, user_token, run_id, deploy_task_id
                     )
-                    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
-                ''', (name, task_type, script_path, script_args, training_task_id,
-                      test_code_path, mock_url, mock_task_name, user_token, run_id))
+                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+                ''', (name, task_type, server_name, script_path, script_args, training_task_id,
+                      test_code_path, mock_url, mock_task_name, user_token, run_id, deploy_task_id))
                 conn.commit()
                 return True, cursor.lastrowid
         except Exception as e:
@@ -651,7 +669,7 @@ class DatabaseManager:
     
     def update_test_task(self, task_id, **kwargs):
         try:
-            allowed = {'server_name', 'port', 'gpu_ids', 'status', 'pid', 'started_at', 'finished_at', 'result'}
+            allowed = {'server_name', 'port', 'gpu_ids', 'status', 'pid', 'started_at', 'finished_at', 'result', 'log_path'}
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 updates = []
@@ -707,6 +725,19 @@ class DatabaseManager:
                 return [self._row_to_test_task(row) for row in cursor.fetchall()]
         except Exception:
             return []
+
+    def get_running_test_tasks(self):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT * FROM test_tasks
+                    WHERE status="running" AND pid IS NOT NULL AND TRIM(CAST(pid AS TEXT)) <> ''
+                    ORDER BY started_at ASC, id ASC
+                ''')
+                return [self._row_to_test_task(row) for row in cursor.fetchall()]
+        except Exception:
+            return []
     
     def _row_to_test_task(self, row):
         return {
@@ -719,6 +750,8 @@ class DatabaseManager:
             'mock_task_name': row[18] if len(row) > 18 else '',
             'user_token': row[19] if len(row) > 19 else '',
             'run_id': row[20] if len(row) > 20 else '',
+            'deploy_task_id': row[21] if len(row) > 21 else None,
+            'log_path': row[22] if len(row) > 22 else '',
         }
 
     # ========== 部署任务 ==========
@@ -761,6 +794,19 @@ class DatabaseManager:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('SELECT * FROM deploy_tasks WHERE status="pending" ORDER BY priority DESC, created_at ASC')
+                return [self._row_to_deploy_task(row) for row in cursor.fetchall()]
+        except Exception:
+            return []
+
+    def get_running_deploy_tasks(self):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT * FROM deploy_tasks
+                    WHERE status="running" AND pid IS NOT NULL AND TRIM(CAST(pid AS TEXT)) <> ''
+                    ORDER BY started_at ASC, id ASC
+                ''')
                 return [self._row_to_deploy_task(row) for row in cursor.fetchall()]
         except Exception:
             return []

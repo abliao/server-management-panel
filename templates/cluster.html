@@ -251,13 +251,13 @@
                     <label>训练-算力阈值(%)</label>
                     <input type="number" id="cfg-train-util" value="15" min="0" max="100">
                 </div>
-                <div class="form-group" style="flex:0 0 100%; margin-top:12px;"><strong style="color:#7ee787;">测试用</strong>（要求较低，可用更繁忙的卡）</div>
+                <div class="form-group" style="flex:0 0 100%; margin-top:12px;"><strong style="color:#7ee787;">部署用</strong>（要求较低，可用更繁忙的卡）</div>
                 <div class="form-group">
-                    <label>测试-显存阈值(%)</label>
+                    <label>部署-显存阈值(%)</label>
                     <input type="number" id="cfg-test-mem" value="20" min="0" max="100">
                 </div>
                 <div class="form-group">
-                    <label>测试-算力阈值(%)</label>
+                    <label>部署-算力阈值(%)</label>
                     <input type="number" id="cfg-test-util" value="15" min="0" max="100">
                 </div>
                 <div class="form-group">
@@ -406,6 +406,16 @@
                     <select id="test-type" onchange="onTestTypeChange()"><option value="mock">Mock</option><option value="real">真机</option></select>
                 </div>
                 <div class="form-group">
+                    <label>测试服务器</label>
+                    <select id="test-server"><option value="">请选择服务器</option></select>
+                </div>
+                <div class="form-group">
+                    <label>关联部署任务ID(可选)</label>
+                    <select id="test-deploy-id" onchange="onTestDeployChange()">
+                        <option value="">不关联</option>
+                    </select>
+                </div>
+                <div class="form-group">
                     <label>测试代码路径(相对代码目录)</label>
                     <input type="text" id="test-code-path" placeholder="tests/eval">
                 </div>
@@ -440,7 +450,7 @@
             <div class="table-wrap" style="margin-top:16px;">
                 <table>
                     <thead>
-                        <tr><th>ID</th><th>任务名</th><th>类型</th><th>服务器</th><th>端口</th><th>状态</th><th>操作</th></tr>
+                        <tr><th>ID</th><th>任务名</th><th>类型</th><th>关联部署ID</th><th>服务器</th><th>端口</th><th>状态</th><th>操作</th></tr>
                     </thead>
                     <tbody id="test-list"></tbody>
                 </table>
@@ -494,6 +504,7 @@
         const TRAIN_FORM_KEY = 'cluster_last_train_form';
         const DEPLOY_FORM_KEY = 'cluster_last_deploy_form';
         const TEST_FORM_KEY = 'cluster_last_test_form';
+        let deployTaskCache = [];
 
         function showMsg(type, text) {
             const el = document.getElementById('msg');
@@ -557,6 +568,8 @@
                 const data = {
                     name: payload.name || '',
                     task_type: payload.task_type || 'mock',
+                    server_name: payload.server_name || '',
+                    deploy_task_id: payload.deploy_task_id || '',
                     test_code_path: payload.test_code_path || '',
                     script_path: payload.script_path || '',
                     script_args: payload.script_args || '',
@@ -576,6 +589,8 @@
                 const d = JSON.parse(raw);
                 document.getElementById('test-name').value = d.name || '';
                 document.getElementById('test-type').value = d.task_type || 'mock';
+                document.getElementById('test-server').value = d.server_name || '';
+                document.getElementById('test-deploy-id').value = d.deploy_task_id || '';
                 document.getElementById('test-code-path').value = d.test_code_path || '';
                 document.getElementById('test-script').value = d.script_path || '';
                 document.getElementById('test-args').value = d.script_args || '';
@@ -584,6 +599,7 @@
                 document.getElementById('test-user-token').value = d.user_token || '';
                 document.getElementById('test-run-id').value = d.run_id || '';
                 onTestTypeChange();
+                onTestDeployChange();
                 showMsg('ok', '已填入上次测试参数');
             } catch (e) {
                 showMsg('err', '读取上次测试参数失败');
@@ -692,7 +708,7 @@
             }
             el.innerHTML = `<div class="idle-gpu-grid">${d.servers.map(s => {
                 const trainIds = s.train_idle_gpus || [];
-                const testIds = s.test_idle_gpus || s.idle_gpus || [];
+                const deployIds = s.deploy_idle_gpus || s.test_idle_gpus || s.idle_gpus || [];
                 const total = s.total_gpus;
                 const isError = s.connection_error && total === 0;
                 return `
@@ -703,14 +719,15 @@
                         <div class="gpu-value">${renderGpuChips(trainIds)}</div>
                     </div>
                     <div class="gpu-row">
-                        <span class="gpu-label">测试</span>
-                        <div class="gpu-value">${renderGpuChips(testIds)}</div>
+                        <span class="gpu-label">部署</span>
+                        <div class="gpu-value">${renderGpuChips(deployIds)}</div>
                     </div>
                     <div class="gpu-total ${isError ? 'error' : ''}">共 <strong>${isError ? '连接失败' : total + ' 张 GPU'}</strong></div>
                 </div>`;
             }).join('')}</div>`;
             updateTrainServerChoices(d.servers.map(s => s.server));
             updateDeployServerChoices(d.servers.map(s => s.server));
+            updateTestServerChoices(d.servers.map(s => s.server));
         }
 
         function updateTrainServerChoices(serverNames) {
@@ -792,6 +809,58 @@
             return Array.from(checked).map(cb => cb.value.trim()).filter(Boolean);
         }
 
+        function updateTestServerChoices(serverNames) {
+            const el = document.getElementById('test-server');
+            if (!el) return;
+            const current = el.value;
+            let lastServer = '';
+            try {
+                const raw = localStorage.getItem(TEST_FORM_KEY);
+                if (raw) {
+                    const d = JSON.parse(raw);
+                    lastServer = (d.server_name || '').trim();
+                }
+            } catch (e) {}
+            const selected = current || lastServer;
+            el.innerHTML = '<option value="">请选择服务器</option>' + serverNames.map(name => {
+                const selectedAttr = selected === name ? 'selected' : '';
+                return `<option value="${name.replace(/"/g, '&quot;')}" ${selectedAttr}>${name.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</option>`;
+            }).join('');
+        }
+
+        function updateTestDeployChoices(tasks) {
+            const el = document.getElementById('test-deploy-id');
+            if (!el) return;
+            const current = el.value;
+            let lastId = '';
+            try {
+                const raw = localStorage.getItem(TEST_FORM_KEY);
+                if (raw) {
+                    const d = JSON.parse(raw);
+                    lastId = d.deploy_task_id ? String(d.deploy_task_id) : '';
+                }
+            } catch (e) {}
+            const selected = current || lastId;
+            const options = (tasks || []).map(t => {
+                const id = String(t.id);
+                const selectedAttr = selected === id ? 'selected' : '';
+                const label = `${t.id} - ${t.name || ''}`.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                return `<option value="${id}" ${selectedAttr}>${label}</option>`;
+            }).join('');
+            el.innerHTML = '<option value="">不关联</option>' + options;
+        }
+
+        function onTestDeployChange() {
+            const el = document.getElementById('test-deploy-id');
+            const id = (el && el.value ? el.value : '').trim();
+            if (!id) return;
+            const task = deployTaskCache.find(t => String(t.id) === id);
+            if (!task) return;
+            if (task.server_name) document.getElementById('test-server').value = task.server_name;
+            if (task.name) document.getElementById('test-mock-task-name').value = task.name;
+            if (task.port) document.getElementById('test-mock-url').value = `http://127.0.0.1:${task.port}`;
+        }
+
         function prettyPathName(path) {
             if (!path) return '-';
             const p = String(path);
@@ -844,6 +913,8 @@
             if (!d.success) { tbody.innerHTML = '<tr><td colspan="9">加载失败</td></tr>'; return; }
             const statusClass = { pending: 'badge-pending', running: 'badge-running', done: 'badge-done', failed: 'badge-failed', killed: 'badge-killed' };
             const tasks = d.tasks || [];
+            deployTaskCache = tasks;
+            updateTestDeployChoices(tasks);
             const shown = sectionCollapsed.deploy ? tasks.slice(0, 10) : tasks;
             let rows = shown.map(t => `
                 <tr>
@@ -944,6 +1015,15 @@
             document.getElementById('log-content').textContent = text || '(空)';
         }
 
+        async function viewTestLog(id) {
+            document.getElementById('log-modal-title').textContent = '测试日志';
+            document.getElementById('log-modal').classList.add('show');
+            document.getElementById('log-content').textContent = '加载中...';
+            const r = await fetch('/api/cluster/test/' + id + '/log');
+            const text = await r.text();
+            document.getElementById('log-content').textContent = text || '(空)';
+        }
+
         function showPathDetail(label, encodedPath) {
             const fullPath = decodeURIComponent(encodedPath || '');
             document.getElementById('log-modal-title').textContent = label || '路径详情';
@@ -1018,7 +1098,7 @@
         async function loadTest() {
             const d = await api('/api/cluster/test/list');
             const tbody = document.getElementById('test-list');
-            if (!d.success) { tbody.innerHTML = '<tr><td colspan="7">加载失败</td></tr>'; return; }
+            if (!d.success) { tbody.innerHTML = '<tr><td colspan="8">加载失败</td></tr>'; return; }
             const statusClass = { pending: 'badge-pending', running: 'badge-running', done: 'badge-done', failed: 'badge-failed', killed: 'badge-killed' };
             const tasks = d.tasks || [];
             const shown = sectionCollapsed.test ? tasks.slice(0, 10) : tasks;
@@ -1027,19 +1107,21 @@
                     <td>${t.id}</td>
                     <td>${t.name}</td>
                     <td>${t.task_type}</td>
+                    <td>${t.deploy_task_id || '-'}</td>
                     <td>${t.server_name || '-'}</td>
                     <td>${t.port || '-'}</td>
                     <td><span class="badge ${statusClass[t.status] || 'badge-pending'}">${t.status}</span></td>
                     <td>
+                        ${t.log_path ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="viewTestLog(${t.id})">日志</button>` : ''}
                         ${t.status === 'running' ? `<button class="btn btn-danger" style="padding:4px 8px;font-size:0.8rem;" onclick="killTest(${t.id})">停止</button>` : ''}
                         ${t.status !== 'running' ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="deleteTest(${t.id})">删除</button>` : ''}
                     </td>
                 </tr>
             `).join('');
             if (!rows) {
-                rows = '<tr><td colspan="7">暂无测试任务</td></tr>';
+                rows = '<tr><td colspan="8">暂无测试任务</td></tr>';
             } else if (sectionCollapsed.test && tasks.length > 10) {
-                rows += `<tr><td colspan="7" style="text-align:center;color:#8b949e;font-size:0.8rem;">共 ${tasks.length} 条，仅显示前 10 条，点击“折叠/展开”查看全部</td></tr>`;
+                rows += `<tr><td colspan="8" style="text-align:center;color:#8b949e;font-size:0.8rem;">共 ${tasks.length} 条，仅显示前 10 条，点击“折叠/展开”查看全部</td></tr>`;
             }
             tbody.innerHTML = rows;
         }
@@ -1047,6 +1129,8 @@
         async function submitTest() {
             const name = document.getElementById('test-name').value.trim();
             const type = document.getElementById('test-type').value;
+            const serverName = document.getElementById('test-server').value.trim();
+            const deployId = document.getElementById('test-deploy-id').value.trim();
             const testCodePath = document.getElementById('test-code-path').value.trim();
             const script = document.getElementById('test-script').value.trim();
             const args = document.getElementById('test-args').value.trim();
@@ -1055,6 +1139,7 @@
             const userToken = document.getElementById('test-user-token').value.trim();
             const runId = document.getElementById('test-run-id').value.trim();
             if (!name) { showMsg('err', '任务名必填'); return; }
+            if (!serverName) { showMsg('err', '测试服务器必选'); return; }
             if (!script) { showMsg('err', '脚本路径必填'); return; }
             if (!testCodePath) { showMsg('err', '测试代码路径必填'); return; }
             if (!mockUrl || !mockTaskName) { showMsg('err', 'URL 和 task_name 必填'); return; }
@@ -1062,6 +1147,8 @@
             const payload = {
                 name,
                 task_type: type,
+                server_name: serverName,
+                deploy_task_id: deployId || null,
                 test_code_path: testCodePath,
                 script_path: script,
                 script_args: args,
