@@ -148,9 +148,54 @@ class DatabaseManager:
                     started_at TIMESTAMP,
                     finished_at TIMESTAMP,
                     result TEXT,
+                    test_code_path TEXT,
+                    mock_url TEXT,
+                    mock_task_name TEXT,
+                    user_token TEXT,
+                    run_id TEXT,
                     FOREIGN KEY (training_task_id) REFERENCES training_tasks(id)
                 )
             ''')
+            # 迁移：为测试任务表添加新参数列
+            cursor.execute("PRAGMA table_info(test_tasks)")
+            test_cols = [r[1] for r in cursor.fetchall()]
+            if 'test_code_path' not in test_cols:
+                cursor.execute("ALTER TABLE test_tasks ADD COLUMN test_code_path TEXT DEFAULT ''")
+            if 'mock_url' not in test_cols:
+                cursor.execute("ALTER TABLE test_tasks ADD COLUMN mock_url TEXT DEFAULT ''")
+            if 'mock_task_name' not in test_cols:
+                cursor.execute("ALTER TABLE test_tasks ADD COLUMN mock_task_name TEXT DEFAULT ''")
+            if 'user_token' not in test_cols:
+                cursor.execute("ALTER TABLE test_tasks ADD COLUMN user_token TEXT DEFAULT ''")
+            if 'run_id' not in test_cols:
+                cursor.execute("ALTER TABLE test_tasks ADD COLUMN run_id TEXT DEFAULT ''")
+
+            # 部署任务表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS deploy_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    script_path TEXT NOT NULL,
+                    weight_path TEXT,
+                    server_name TEXT,
+                    gpu_ids TEXT,
+                    priority INTEGER DEFAULT 5,
+                    allowed_servers TEXT DEFAULT '',
+                    status TEXT DEFAULT 'pending',
+                    log_path TEXT,
+                    pid INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    started_at TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    result TEXT,
+                    port INTEGER
+                )
+            ''')
+            # 迁移：为部署任务表添加 port
+            cursor.execute("PRAGMA table_info(deploy_tasks)")
+            deploy_cols = [r[1] for r in cursor.fetchall()]
+            if 'port' not in deploy_cols:
+                cursor.execute("ALTER TABLE deploy_tasks ADD COLUMN port INTEGER")
             
             # 模型权重记录表
             cursor.execute('''
@@ -586,14 +631,19 @@ class DatabaseManager:
         }
     
     # ========== 测试任务 ==========
-    def add_test_task(self, name, task_type, weight_path='', script_path='', script_args='', training_task_id=None):
+    def add_test_task(self, name, task_type, script_path='', script_args='', training_task_id=None,
+                      test_code_path='', mock_url='', mock_task_name='', user_token='', run_id=''):
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO test_tasks (name, task_type, weight_path, script_path, script_args, training_task_id, status)
-                    VALUES (?, ?, ?, ?, ?, ?, 'pending')
-                ''', (name, task_type, weight_path, script_path, script_args, training_task_id))
+                    INSERT INTO test_tasks (
+                        name, task_type, script_path, script_args, training_task_id, status,
+                        test_code_path, mock_url, mock_task_name, user_token, run_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+                ''', (name, task_type, script_path, script_args, training_task_id,
+                      test_code_path, mock_url, mock_task_name, user_token, run_id))
                 conn.commit()
                 return True, cursor.lastrowid
         except Exception as e:
@@ -663,7 +713,100 @@ class DatabaseManager:
             'id': row[0], 'name': row[1], 'task_type': row[2], 'server_name': row[3], 'port': row[4],
             'gpu_ids': row[5], 'weight_path': row[6], 'script_path': row[7], 'script_args': row[8],
             'training_task_id': row[9], 'status': row[10], 'pid': row[11],
-            'created_at': row[12], 'started_at': row[13], 'finished_at': row[14], 'result': row[15]
+            'created_at': row[12], 'started_at': row[13], 'finished_at': row[14], 'result': row[15],
+            'test_code_path': row[16] if len(row) > 16 else '',
+            'mock_url': row[17] if len(row) > 17 else '',
+            'mock_task_name': row[18] if len(row) > 18 else '',
+            'user_token': row[19] if len(row) > 19 else '',
+            'run_id': row[20] if len(row) > 20 else '',
+        }
+
+    # ========== 部署任务 ==========
+    def add_deploy_task(self, name, script_path, weight_path='', priority=5, allowed_servers=None, port=None):
+        try:
+            allowed_str = json.dumps(allowed_servers or []) if allowed_servers is not None else '[]'
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO deploy_tasks (name, script_path, weight_path, priority, allowed_servers, status, port)
+                    VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                ''', (name, script_path, weight_path, int(priority), allowed_str, port))
+                conn.commit()
+                return True, cursor.lastrowid
+        except Exception as e:
+            return False, str(e)
+
+    def update_deploy_task(self, task_id, **kwargs):
+        try:
+            allowed = {'server_name', 'gpu_ids', 'status', 'log_path', 'pid', 'started_at', 'finished_at', 'result', 'weight_path', 'script_path', 'priority', 'port'}
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                updates = []
+                values = []
+                for k, v in kwargs.items():
+                    if k in allowed:
+                        updates.append(f'{k}=?')
+                        values.append(v)
+                if not updates:
+                    return False
+                values.append(task_id)
+                cursor.execute(f'UPDATE deploy_tasks SET {", ".join(updates)} WHERE id=?', values)
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception:
+            return False
+
+    def get_pending_deploy_tasks(self):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM deploy_tasks WHERE status="pending" ORDER BY priority DESC, created_at ASC')
+                return [self._row_to_deploy_task(row) for row in cursor.fetchall()]
+        except Exception:
+            return []
+
+    def get_deploy_task(self, task_id):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM deploy_tasks WHERE id=?', (task_id,))
+                row = cursor.fetchone()
+                return self._row_to_deploy_task(row) if row else None
+        except Exception:
+            return None
+
+    def get_all_deploy_tasks(self, limit=100):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM deploy_tasks ORDER BY id DESC LIMIT ?', (limit,))
+                return [self._row_to_deploy_task(row) for row in cursor.fetchall()]
+        except Exception:
+            return []
+
+    def delete_deploy_task(self, task_id):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM deploy_tasks WHERE id=?', (task_id,))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception:
+            return False
+
+    def _row_to_deploy_task(self, row):
+        allowed = []
+        if len(row) > 7 and row[7]:
+            try:
+                allowed = json.loads(row[7])
+            except (TypeError, ValueError):
+                allowed = []
+        return {
+            'id': row[0], 'name': row[1], 'script_path': row[2], 'weight_path': row[3] or '',
+            'server_name': row[4], 'gpu_ids': row[5], 'priority': row[6], 'allowed_servers': allowed,
+            'status': row[8], 'log_path': row[9], 'pid': row[10], 'created_at': row[11],
+            'started_at': row[12], 'finished_at': row[13], 'result': row[14],
+            'port': row[15] if len(row) > 15 else None
         }
     
     # ========== 模型权重 ==========

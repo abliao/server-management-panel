@@ -332,6 +332,62 @@
             </div>
         </div>
 
+        <!-- 部署任务 -->
+        <div class="section">
+            <h2>
+                <i class="fas fa-rocket"></i> 部署任务
+                <button type="button" class="section-toggle" onclick="toggleSection('deploy')">折叠/展开</button>
+                <button type="button" class="section-toggle" onclick="fillLastDeployForm()">填入上次</button>
+            </h2>
+            <div id="deploy-section-body">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>任务名</label>
+                    <input type="text" id="deploy-name" placeholder="deploy_search_green_boxes">
+                </div>
+                <div class="form-group">
+                    <label>脚本路径(相对代码目录)</label>
+                    <input type="text" id="deploy-script" placeholder="deploy.sh 或 deploy.py">
+                </div>
+                <div class="form-group">
+                    <label>模型权重(可选)</label>
+                    <input type="text" id="deploy-weight" placeholder="checkpoints/xxx.pt">
+                </div>
+                <div class="form-group">
+                    <label>优先级(1-10)</label>
+                    <input type="number" id="deploy-priority" value="5" min="1" max="10">
+                </div>
+                <div class="form-group">
+                    <label>端口(可选)</label>
+                    <input type="number" id="deploy-port" value="" min="1" max="65535" placeholder="如 18080">
+                </div>
+                <div class="form-group" style="display:flex;align-items:flex-end;">
+                    <button class="btn btn-primary" onclick="submitDeploy()">提交部署</button>
+                </div>
+            </div>
+            <div class="form-row" style="align-items:flex-start;">
+                <div class="form-group" style="flex:0 0 100%;">
+                    <label>可选服务器 <span style="color:#8b949e;font-weight:400;font-size:0.85em;">（不选=全部可用）</span></label>
+                    <div id="deploy-server-choices" class="server-checkboxes" style="display:flex;flex-wrap:wrap;gap:12px 20px;margin-top:6px;padding:10px;background:#0d1117;border-radius:6px;border:1px solid #30363d;">
+                        <span style="color:#6e7681;font-size:0.9em;">加载中...</span>
+                    </div>
+                    <div style="margin-top:6px;">
+                        <button type="button" class="btn btn-secondary" style="padding:4px 10px;font-size:0.8rem;" onclick="deployServerSelectAll()">全选</button>
+                        <button type="button" class="btn btn-secondary" style="padding:4px 10px;font-size:0.8rem;margin-left:8px;" onclick="deployServerSelectNone()">清空</button>
+                    </div>
+                </div>
+            </div>
+            <div class="table-wrap" style="margin-top:16px;">
+                <table>
+                    <thead>
+                        <tr><th>ID</th><th>任务名</th><th>脚本</th><th>权重</th><th>服务器</th><th>GPU</th><th>端口</th><th>状态</th><th>操作</th></tr>
+                    </thead>
+                    <tbody id="deploy-list"></tbody>
+                </table>
+            </div>
+            </div>
+        </div>
+
         <!-- 测试任务 -->
         <div class="section">
             <h2>
@@ -347,11 +403,11 @@
                 </div>
                 <div class="form-group">
                     <label>类型</label>
-                    <select id="test-type"><option value="mock">Mock</option><option value="real">真机</option></select>
+                    <select id="test-type" onchange="onTestTypeChange()"><option value="mock">Mock</option><option value="real">真机</option></select>
                 </div>
                 <div class="form-group">
-                    <label>权重路径</label>
-                    <input type="text" id="test-weight" placeholder="/path/to/weights">
+                    <label>测试代码路径(相对代码目录)</label>
+                    <input type="text" id="test-code-path" placeholder="tests/eval">
                 </div>
                 <div class="form-group">
                     <label>脚本路径</label>
@@ -360,6 +416,22 @@
                 <div class="form-group">
                     <label>脚本参数</label>
                     <input type="text" id="test-args" placeholder="">
+                </div>
+                <div class="form-group test-mock-field">
+                    <label>URL</label>
+                    <input type="text" id="test-mock-url" placeholder="http://127.0.0.1:8000/mock">
+                </div>
+                <div class="form-group test-mock-field">
+                    <label>task_name</label>
+                    <input type="text" id="test-mock-task-name" placeholder="search_green_boxes">
+                </div>
+                <div class="form-group test-real-field" style="display:none;">
+                    <label>Real user_token</label>
+                    <input type="text" id="test-user-token" placeholder="token_xxx">
+                </div>
+                <div class="form-group test-real-field" style="display:none;">
+                    <label>Real run_id</label>
+                    <input type="text" id="test-run-id" placeholder="run_001">
                 </div>
                 <div class="form-group" style="display:flex;align-items:flex-end;">
                     <button class="btn btn-primary" onclick="submitTest()">提交测试</button>
@@ -420,6 +492,7 @@
 
     <script>
         const TRAIN_FORM_KEY = 'cluster_last_train_form';
+        const DEPLOY_FORM_KEY = 'cluster_last_deploy_form';
         const TEST_FORM_KEY = 'cluster_last_test_form';
 
         function showMsg(type, text) {
@@ -439,6 +512,7 @@
 
         const sectionCollapsed = {
             train: true,
+            deploy: true,
             test: true,
             alert: true,
         };
@@ -483,9 +557,13 @@
                 const data = {
                     name: payload.name || '',
                     task_type: payload.task_type || 'mock',
-                    weight_path: payload.weight_path || '',
+                    test_code_path: payload.test_code_path || '',
                     script_path: payload.script_path || '',
-                    script_args: payload.script_args || ''
+                    script_args: payload.script_args || '',
+                    mock_url: payload.mock_url || '',
+                    mock_task_name: payload.mock_task_name || '',
+                    user_token: payload.user_token || '',
+                    run_id: payload.run_id || ''
                 };
                 localStorage.setItem(TEST_FORM_KEY, JSON.stringify(data));
             } catch (e) {}
@@ -498,12 +576,61 @@
                 const d = JSON.parse(raw);
                 document.getElementById('test-name').value = d.name || '';
                 document.getElementById('test-type').value = d.task_type || 'mock';
-                document.getElementById('test-weight').value = d.weight_path || '';
+                document.getElementById('test-code-path').value = d.test_code_path || '';
                 document.getElementById('test-script').value = d.script_path || '';
                 document.getElementById('test-args').value = d.script_args || '';
+                document.getElementById('test-mock-url').value = d.mock_url || '';
+                document.getElementById('test-mock-task-name').value = d.mock_task_name || '';
+                document.getElementById('test-user-token').value = d.user_token || '';
+                document.getElementById('test-run-id').value = d.run_id || '';
+                onTestTypeChange();
                 showMsg('ok', '已填入上次测试参数');
             } catch (e) {
                 showMsg('err', '读取上次测试参数失败');
+            }
+        }
+
+        function onTestTypeChange() {
+            const type = document.getElementById('test-type').value;
+            const mockEls = document.querySelectorAll('.test-mock-field');
+            const realEls = document.querySelectorAll('.test-real-field');
+            // URL/task_name 两种模式都需要填写
+            mockEls.forEach(el => el.style.display = '');
+            realEls.forEach(el => el.style.display = (type === 'real') ? '' : 'none');
+        }
+
+        function saveLastDeployForm(payload, allowedServers) {
+            try {
+                const data = {
+                    name: payload.name || '',
+                    script_path: payload.script_path || '',
+                    weight_path: payload.weight_path || '',
+                    priority: payload.priority || 5,
+                    port: payload.port || '',
+                    allowed_servers: allowedServers || []
+                };
+                localStorage.setItem(DEPLOY_FORM_KEY, JSON.stringify(data));
+            } catch (e) {}
+        }
+
+        function fillLastDeployForm() {
+            try {
+                const raw = localStorage.getItem(DEPLOY_FORM_KEY);
+                if (!raw) { showMsg('err', '暂无上次部署参数'); return; }
+                const d = JSON.parse(raw);
+                document.getElementById('deploy-name').value = d.name || '';
+                document.getElementById('deploy-script').value = d.script_path || '';
+                document.getElementById('deploy-weight').value = d.weight_path || '';
+                document.getElementById('deploy-priority').value = d.priority || 5;
+                document.getElementById('deploy-port').value = d.port || '';
+                if (Array.isArray(d.allowed_servers) && d.allowed_servers.length > 0) {
+                    document.querySelectorAll('.deploy-server-cb').forEach(cb => {
+                        cb.checked = d.allowed_servers.includes(cb.value);
+                    });
+                }
+                showMsg('ok', '已填入上次部署参数');
+            } catch (e) {
+                showMsg('err', '读取上次部署参数失败');
             }
         }
 
@@ -513,6 +640,8 @@
             // 重新渲染对应列表，折叠状态下只显示前 10 条
             if (key === 'train') {
                 loadTraining();
+            } else if (key === 'deploy') {
+                loadDeploy();
             } else if (key === 'test') {
                 loadTest();
             } else if (key === 'alert') {
@@ -581,6 +710,7 @@
                 </div>`;
             }).join('')}</div>`;
             updateTrainServerChoices(d.servers.map(s => s.server));
+            updateDeployServerChoices(d.servers.map(s => s.server));
         }
 
         function updateTrainServerChoices(serverNames) {
@@ -622,6 +752,44 @@
             const checked = document.querySelectorAll('.train-server-cb:checked');
             const names = Array.from(checked).map(cb => cb.value.trim()).filter(Boolean);
             return names;
+        }
+
+        function updateDeployServerChoices(serverNames) {
+            const el = document.getElementById('deploy-server-choices');
+            if (!el || !serverNames || serverNames.length === 0) {
+                el.innerHTML = '<span style="color:#6e7681;">暂无服务器</span>';
+                return;
+            }
+            let lastAllowed = [];
+            try {
+                const raw = localStorage.getItem(DEPLOY_FORM_KEY);
+                if (raw) {
+                    const d = JSON.parse(raw);
+                    if (Array.isArray(d.allowed_servers)) lastAllowed = d.allowed_servers;
+                }
+            } catch (e) {}
+            el.innerHTML = serverNames.map(name => {
+                const safeName = name.replace(/"/g, '&quot;');
+                const labelName = name.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const checked = !lastAllowed.length || lastAllowed.includes(name);
+                return `<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:0.9rem;">
+                    <input type="checkbox" class="deploy-server-cb" value="${safeName}" ${checked ? 'checked' : ''}>
+                    ${labelName}
+                </label>`;
+            }).join('');
+        }
+
+        function deployServerSelectAll() {
+            document.querySelectorAll('.deploy-server-cb').forEach(cb => cb.checked = true);
+        }
+
+        function deployServerSelectNone() {
+            document.querySelectorAll('.deploy-server-cb').forEach(cb => cb.checked = false);
+        }
+
+        function getDeploySelectedServers() {
+            const checked = document.querySelectorAll('.deploy-server-cb:checked');
+            return Array.from(checked).map(cb => cb.value.trim()).filter(Boolean);
         }
 
         function prettyPathName(path) {
@@ -670,6 +838,67 @@
             tbody.innerHTML = rows;
         }
 
+        async function loadDeploy() {
+            const d = await api('/api/cluster/deploy/list');
+            const tbody = document.getElementById('deploy-list');
+            if (!d.success) { tbody.innerHTML = '<tr><td colspan="9">加载失败</td></tr>'; return; }
+            const statusClass = { pending: 'badge-pending', running: 'badge-running', done: 'badge-done', failed: 'badge-failed', killed: 'badge-killed' };
+            const tasks = d.tasks || [];
+            const shown = sectionCollapsed.deploy ? tasks.slice(0, 10) : tasks;
+            let rows = shown.map(t => `
+                <tr>
+                    <td>${t.id}</td>
+                    <td>${t.name}</td>
+                    <td>${renderPathCell(t.script_path, '部署脚本路径')}</td>
+                    <td>${renderPathCell(t.weight_path, '部署权重路径')}</td>
+                    <td>${t.server_name || '-'}</td>
+                    <td>${t.gpu_ids || '-'}</td>
+                    <td>${t.port || '-'}</td>
+                    <td><span class="badge ${statusClass[t.status] || 'badge-pending'}">${t.status}</span></td>
+                    <td>
+                        ${t.log_path ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="viewDeployLog(${t.id})">日志</button>` : ''}
+                        ${t.status === 'running' ? `<button class="btn btn-danger" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="killDeploy(${t.id})">停止</button>` : ''}
+                        ${t.status !== 'running' ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="deleteDeploy(${t.id})">删除</button>` : ''}
+                        <button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-left:4px;" onclick="recordDeployPort(${t.id}, '${t.port || ''}')">${t.port ? '修改端口' : '记录端口'}</button>
+                    </td>
+                </tr>
+            `).join('');
+            if (!rows) {
+                rows = '<tr><td colspan="9">暂无部署任务</td></tr>';
+            } else if (sectionCollapsed.deploy && tasks.length > 10) {
+                rows += `<tr><td colspan="9" style="text-align:center;color:#8b949e;font-size:0.8rem;">共 ${tasks.length} 条，仅显示前 10 条，点击“折叠/展开”查看全部</td></tr>`;
+            }
+            tbody.innerHTML = rows;
+        }
+
+        async function submitDeploy() {
+            const name = document.getElementById('deploy-name').value.trim();
+            const script = document.getElementById('deploy-script').value.trim();
+            const weight = document.getElementById('deploy-weight').value.trim();
+            const priority = parseInt(document.getElementById('deploy-priority').value || '5', 10);
+            const portRaw = document.getElementById('deploy-port').value.trim();
+            const port = portRaw ? parseInt(portRaw, 10) : null;
+            const allowedServers = getDeploySelectedServers();
+            if (!name || !script) { showMsg('err', '任务名和脚本路径必填'); return; }
+            if (portRaw && (isNaN(port) || port < 1 || port > 65535)) { showMsg('err', '端口范围应为 1-65535'); return; }
+            const payload = {
+                name,
+                script_path: script,
+                weight_path: weight,
+                priority: isNaN(priority) ? 5 : priority,
+                port: port
+            };
+            if (allowedServers.length > 0) payload.allowed_servers = allowedServers;
+            saveLastDeployForm(payload, allowedServers);
+            const d = await api('/api/cluster/deploy/submit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (d.success) { showMsg('ok', '部署任务已提交'); loadDeploy(); }
+            else showMsg('err', d.error);
+        }
+
         async function submitTraining() {
             const name = document.getElementById('train-name').value.trim();
             const script = document.getElementById('train-script').value.trim();
@@ -706,6 +935,15 @@
             document.getElementById('log-content').textContent = text || '(空)';
         }
 
+        async function viewDeployLog(id) {
+            document.getElementById('log-modal-title').textContent = '部署日志';
+            document.getElementById('log-modal').classList.add('show');
+            document.getElementById('log-content').textContent = '加载中...';
+            const r = await fetch('/api/cluster/deploy/' + id + '/log');
+            const text = await r.text();
+            document.getElementById('log-content').textContent = text || '(空)';
+        }
+
         function showPathDetail(label, encodedPath) {
             const fullPath = decodeURIComponent(encodedPath || '');
             document.getElementById('log-modal-title').textContent = label || '路径详情';
@@ -728,6 +966,38 @@
             if (!confirm('确定删除该训练任务？此操作不可恢复')) return;
             const d = await api('/api/cluster/training/' + id + '/delete', { method: 'POST' });
             if (d.success) { showMsg('ok', '已删除'); loadTraining(); }
+            else showMsg('err', d.error);
+        }
+
+        async function killDeploy(id) {
+            if (!confirm('确定停止该部署任务？')) return;
+            const d = await api('/api/cluster/deploy/' + id + '/kill', { method: 'POST' });
+            if (d.success) { showMsg('ok', '已停止'); loadDeploy(); }
+            else showMsg('err', d.error);
+        }
+
+        async function deleteDeploy(id) {
+            if (!confirm('确定删除该部署任务？此操作不可恢复')) return;
+            const d = await api('/api/cluster/deploy/' + id + '/delete', { method: 'POST' });
+            if (d.success) { showMsg('ok', '已删除'); loadDeploy(); }
+            else showMsg('err', d.error);
+        }
+
+        async function recordDeployPort(id, currentPort) {
+            const defaultPort = (currentPort || '').toString();
+            const p = prompt('请输入部署端口（1-65535）：', defaultPort || '18080');
+            if (!p) return;
+            const port = parseInt(p.trim(), 10);
+            if (isNaN(port) || port < 1 || port > 65535) {
+                showMsg('err', '端口范围应为 1-65535');
+                return;
+            }
+            const d = await api('/api/cluster/deploy/' + id + '/port', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ port })
+            });
+            if (d.success) { showMsg('ok', currentPort ? '端口已修改' : '端口已记录'); loadDeploy(); }
             else showMsg('err', d.error);
         }
 
@@ -777,11 +1047,29 @@
         async function submitTest() {
             const name = document.getElementById('test-name').value.trim();
             const type = document.getElementById('test-type').value;
-            const weight = document.getElementById('test-weight').value.trim();
+            const testCodePath = document.getElementById('test-code-path').value.trim();
             const script = document.getElementById('test-script').value.trim();
             const args = document.getElementById('test-args').value.trim();
+            const mockUrl = document.getElementById('test-mock-url').value.trim();
+            const mockTaskName = document.getElementById('test-mock-task-name').value.trim();
+            const userToken = document.getElementById('test-user-token').value.trim();
+            const runId = document.getElementById('test-run-id').value.trim();
             if (!name) { showMsg('err', '任务名必填'); return; }
-            const payload = { name, task_type: type, weight_path: weight, script_path: script, script_args: args };
+            if (!script) { showMsg('err', '脚本路径必填'); return; }
+            if (!testCodePath) { showMsg('err', '测试代码路径必填'); return; }
+            if (!mockUrl || !mockTaskName) { showMsg('err', 'URL 和 task_name 必填'); return; }
+            if (type === 'real' && (!userToken || !runId)) { showMsg('err', 'real 模式需填写 user_token 和 run_id'); return; }
+            const payload = {
+                name,
+                task_type: type,
+                test_code_path: testCodePath,
+                script_path: script,
+                script_args: args,
+                mock_url: mockUrl,
+                mock_task_name: mockTaskName,
+                user_token: userToken,
+                run_id: runId
+            };
             // 本地记录上一次测试参数
             saveLastTestForm(payload);
             const d = await api('/api/cluster/test/submit', {
@@ -853,6 +1141,7 @@
             loadConfig();
             loadIdleGpus();
             loadTraining();
+            loadDeploy();
             loadTest();
             loadWeights();
             loadAlerts();
@@ -860,6 +1149,7 @@
 
         document.addEventListener('DOMContentLoaded', function() {
             refresh();
+            onTestTypeChange();
             setInterval(refresh, 15000);
         });
     </script>

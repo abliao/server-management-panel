@@ -8,6 +8,7 @@ import threading
 import os
 import tempfile
 import re
+import shlex
 import secrets
 import hashlib
 from datetime import datetime, timezone, timedelta
@@ -449,15 +450,33 @@ def run_training_on_server(task, server, gpu_ids):
 def run_test_on_server(task, server, gpu_ids, port):
     """在指定服务器上启动测试任务（mock 或真机）"""
     code_path = server.get('code_path') or db.get_config(CONFIG_CODE_PATH, '/home')
+    test_code_path = task.get('test_code_path') or code_path
     script = task.get('script_path') or ''
     args = task.get('script_args') or ''
-    weight = task.get('weight_path') or ''
+    task_type = task.get('task_type') or 'mock'
+    mock_url = task.get('mock_url') or ''
+    mock_task_name = task.get('mock_task_name') or ''
+    user_token = task.get('user_token') or ''
+    run_id = task.get('run_id') or ''
     gpu_str = ','.join(map(str, gpu_ids)) if gpu_ids else ''
     env = f'CUDA_VISIBLE_DEVICES={gpu_str}' if gpu_str else ''
     log_path = f"outputs/logs/test_{task['id']}_{int(time.time())}.log"
-    # 假设测试脚本接受 --port 和 --weight 等参数
-    extra = f'--port {port} --weight {weight}' if weight else f'--port {port}'
-    cmd = f'mkdir -p outputs/logs; {env} nohup python {script} {args} {extra} > {log_path} 2>&1 & echo $!'
+    extra_parts = [f'--port {int(port)}']
+    if mock_url:
+        extra_parts.append(f'--url {shlex.quote(str(mock_url))}')
+    if mock_task_name:
+        extra_parts.append(f'--task_name {shlex.quote(str(mock_task_name))}')
+    if task_type == 'real':
+        if user_token:
+            extra_parts.append(f'--user_token {shlex.quote(str(user_token))}')
+        if run_id:
+            extra_parts.append(f'--run_id {shlex.quote(str(run_id))}')
+    extra = ' '.join(extra_parts)
+    cmd = (
+        f'mkdir -p outputs/logs; '
+        f'cd {shlex.quote(str(test_code_path))} 2>/dev/null; '
+        f'{env} nohup python {script} {args} {extra} > {log_path} 2>&1 & echo $!'
+    )
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
         return False, out
@@ -473,6 +492,44 @@ def run_test_on_server(task, server, gpu_ids, port):
     db.update_test_task(task['id'], server_name=server['name'], gpu_ids=','.join(map(str, gpu_ids)) if gpu_ids else '',
                         port=port, status='running', pid=pid, started_at=datetime.now(CST).isoformat())
     return True, {'pid': pid, 'port': port, 'log_path': log_path}
+
+
+def run_deploy_on_server(task, server, gpu_ids):
+    """在指定服务器上启动部署任务（支持 .sh 与 .py）"""
+    script = task.get('script_path') or ''
+    weight = task.get('weight_path') or ''
+    port = task.get('port')
+    gpu_str = ','.join(map(str, gpu_ids)) if gpu_ids else ''
+    env = f'CUDA_VISIBLE_DEVICES={gpu_str}' if gpu_str else ''
+    log_path = f"outputs/logs/deploy_{task['id']}_{int(time.time())}.log"
+    runner = 'bash' if script.lower().endswith('.sh') else 'python'
+    weight_arg = f' --weight {weight}' if weight else ''
+    port_arg = f' --port {port}' if port not in (None, '') else ''
+    cmd = f'mkdir -p outputs/logs; {env} nohup {runner} {script}{weight_arg}{port_arg} > {log_path} 2>&1 & echo $!'
+    logger.info(f"[RunDeploy] task_id={task['id']} server={server['name']} script={script} weight={weight} port={port} log={log_path}")
+    logger.info(f"[RunDeploy] full_cmd= {cmd}")
+    ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
+    if not ok:
+        return False, out
+
+    lines = [ln.strip() for ln in (out or '').split('\n') if ln.strip()]
+    if not lines:
+        return False, f'启动部署失败，未获取到 PID，输出为空: {out}'
+    last = lines[-1]
+    pid_match = re.fullmatch(r'(\d+)', last)
+    if not pid_match:
+        return False, f'启动部署失败，未获取到有效 PID，输出: {out}'
+    pid = int(pid_match.group(1))
+    db.update_deploy_task(
+        task['id'],
+        server_name=server['name'],
+        gpu_ids=','.join(map(str, gpu_ids)) if gpu_ids else '',
+        status='running',
+        log_path=log_path,
+        pid=pid,
+        started_at=datetime.now(CST).isoformat()
+    )
+    return True, {'pid': pid, 'log_path': log_path}
 
 
 def cluster_task_scheduler():
@@ -510,6 +567,33 @@ def cluster_task_scheduler():
                     else:
                         logger.info(f"[Scheduler]   start train_task id={task['id']} on {server['name']} gpus={gpu_ids} OK")
                     time.sleep(2)  # 避免连续提交过快
+
+            # 部署任务调度（优先尝试 1 张 GPU，若没有则无 GPU 启动）
+            for task in db.get_pending_deploy_tasks():
+                allowed = task.get('allowed_servers') or []
+                server, gpu_ids = find_idle_server_and_gpus(
+                    gpu_count=1,
+                    reserved=0,
+                    task_type='test',
+                    allowed_servers=allowed if allowed else None
+                )
+                if not server:
+                    server, gpu_ids = find_idle_server_and_gpus(
+                        gpu_count=0,
+                        reserved=0,
+                        task_type='test',
+                        allowed_servers=allowed if allowed else None
+                    )
+                    gpu_ids = []
+                if server:
+                    logger.info(f"[Scheduler]   start deploy_task id={task['id']} on {server['name']} gpus={gpu_ids}")
+                    ok, msg = run_deploy_on_server(task, server, gpu_ids)
+                    if not ok:
+                        logger.info(f"[Scheduler]   start deploy_task id={task['id']} FAILED: {msg}")
+                        db.update_deploy_task(task['id'], status='failed', result=str(msg))
+                    else:
+                        logger.info(f"[Scheduler]   start deploy_task id={task['id']} on {server['name']} OK")
+                    time.sleep(2)
 
             # 测试任务调度（使用测试用阈值，测试对显存/算力要求较低）
             for task in db.get_pending_test_tasks():
@@ -1360,6 +1444,121 @@ def record_training_weight(task_id):
     return jsonify({'success': True})
 
 
+# ========== 部署任务 API ==========
+@app.route('/api/cluster/deploy/submit', methods=['POST'])
+@require_admin
+def submit_deploy_task():
+    data = request.get_json() or {}
+    name = data.get('name', '').strip()
+    script_path = data.get('script_path', '').strip()
+    weight_path = data.get('weight_path', '').strip()
+    priority = int(data.get('priority', 5))
+    port = data.get('port')
+    try:
+        port = int(port) if port not in (None, '') else None
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': '端口必须为数字'})
+    allowed_servers = data.get('allowed_servers')
+    if not name or not script_path:
+        return jsonify({'success': False, 'error': '任务名和脚本路径必填'})
+    ok, result = db.add_deploy_task(
+        name=name,
+        script_path=script_path,
+        weight_path=weight_path,
+        priority=priority,
+        allowed_servers=allowed_servers,
+        port=port
+    )
+    if not ok:
+        return jsonify({'success': False, 'error': str(result)})
+    return jsonify({'success': True, 'task_id': result})
+
+
+@app.route('/api/cluster/deploy/list')
+@require_admin
+def list_deploy_tasks():
+    limit = request.args.get('limit', 100, type=int)
+    tasks = db.get_all_deploy_tasks(limit=limit)
+    return jsonify({'success': True, 'tasks': tasks})
+
+
+@app.route('/api/cluster/deploy/<int:task_id>/log')
+@require_admin
+def get_deploy_log(task_id):
+    task = db.get_deploy_task(task_id)
+    if not task or not task.get('server_name') or not task.get('log_path'):
+        return jsonify({'success': False, 'error': '任务或日志不存在'})
+    server = db.get_server_by_name(task['server_name'])
+    if not server:
+        return jsonify({'success': False, 'error': '服务器不存在'})
+    log_path = task['log_path']
+    prefix = f'[日志路径] {log_path}\\n\\n'
+    ok, content = execute_ssh_command_silent(
+        server,
+        f'if [ -f "{log_path}" ]; then cat "{log_path}"; else echo "(日志文件不存在)"; fi'
+    )
+    if not ok:
+        return jsonify({'success': False, 'error': content})
+    return Response(prefix + (content or ''), mimetype='text/plain; charset=utf-8')
+
+
+@app.route('/api/cluster/deploy/<int:task_id>/kill', methods=['POST'])
+@require_admin
+def kill_deploy_task(task_id):
+    task = db.get_deploy_task(task_id)
+    if not task or task.get('status') != 'running':
+        return jsonify({'success': False, 'error': '任务未在运行'})
+    server = db.get_server_by_name(task['server_name'])
+    if not server:
+        return jsonify({'success': False, 'error': '服务器不存在'})
+    pid = task.get('pid')
+    if not pid:
+        return jsonify({'success': False, 'error': '无 PID'})
+    ok, killed, out = kill_process_group(server, pid)
+    if not ok:
+        return jsonify({'success': False, 'error': f'发送 kill 失败: {out}'})
+    if not killed:
+        return jsonify({'success': False, 'error': f'进程仍在运行 (pid={pid})，请手动检查'})
+    db.update_deploy_task(task_id, status='killed', finished_at=datetime.now(CST).isoformat())
+    return jsonify({'success': True})
+
+
+@app.route('/api/cluster/deploy/<int:task_id>/delete', methods=['POST'])
+@require_admin
+def delete_deploy_task_api(task_id):
+    task = db.get_deploy_task(task_id)
+    if not task:
+        return jsonify({'success': False, 'error': '任务不存在'})
+    if task.get('status') == 'running':
+        return jsonify({'success': False, 'error': '运行中的任务不能删除，请先停止'})
+    ok = db.delete_deploy_task(task_id)
+    if not ok:
+        return jsonify({'success': False, 'error': '删除失败'})
+    return jsonify({'success': True})
+
+
+@app.route('/api/cluster/deploy/<int:task_id>/port', methods=['POST'])
+@require_admin
+def record_deploy_port(task_id):
+    data = request.get_json() or {}
+    port = data.get('port')
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': '端口必须为数字'})
+    if port < 1 or port > 65535:
+        return jsonify({'success': False, 'error': '端口范围应为 1-65535'})
+
+    task = db.get_deploy_task(task_id)
+    if not task:
+        return jsonify({'success': False, 'error': '任务不存在'})
+
+    ok = db.update_deploy_task(task_id, port=port)
+    if not ok:
+        return jsonify({'success': False, 'error': '更新端口失败'})
+    return jsonify({'success': True, 'port': port})
+
+
 # ========== 测试任务 API ==========
 @app.route('/api/cluster/test/submit', methods=['POST'])
 @require_admin
@@ -1367,15 +1566,40 @@ def submit_test_task():
     data = request.get_json() or {}
     name = data.get('name', '').strip()
     task_type = data.get('task_type', 'mock')  # mock 或 real
-    weight_path = data.get('weight_path', '')
     script_path = data.get('script_path', '')
     script_args = data.get('script_args', '')
+    test_code_path = data.get('test_code_path', '').strip()
+    mock_url = data.get('mock_url', '').strip()
+    mock_task_name = data.get('mock_task_name', '').strip()
+    user_token = data.get('user_token', '').strip()
+    run_id = data.get('run_id', '').strip()
     training_task_id = data.get('training_task_id')
     if not name:
         return jsonify({'success': False, 'error': '任务名必填'})
     if task_type not in ('mock', 'real'):
         return jsonify({'success': False, 'error': 'task_type 须为 mock 或 real'})
-    ok, result = db.add_test_task(name, task_type, weight_path, script_path, script_args, training_task_id)
+    if not script_path:
+        return jsonify({'success': False, 'error': '脚本路径必填'})
+    if not test_code_path:
+        return jsonify({'success': False, 'error': '测试代码路径必填'})
+    if not mock_url or not mock_task_name:
+        return jsonify({'success': False, 'error': 'url 和 task_name 必填'})
+    if task_type == 'real':
+        if not user_token or not run_id:
+            return jsonify({'success': False, 'error': 'real 模式需填写 user_token 和 run_id'})
+
+    ok, result = db.add_test_task(
+        name=name,
+        task_type=task_type,
+        script_path=script_path,
+        script_args=script_args,
+        training_task_id=training_task_id,
+        test_code_path=test_code_path,
+        mock_url=mock_url,
+        mock_task_name=mock_task_name,
+        user_token=user_token,
+        run_id=run_id
+    )
     if ok:
         return jsonify({'success': True, 'task_id': result})
     return jsonify({'success': False, 'error': str(result)})
