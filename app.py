@@ -1,5 +1,6 @@
 from flask import Flask, render_template, jsonify, request, send_file, session, redirect, url_for, Response
 import json
+import logging
 import paramiko
 import time
 import threading
@@ -15,6 +16,17 @@ from cluster_utils import parse_gpustat_output, find_idle_gpus, find_available_p
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
+
+# 日志器（替代散落的 print 调试输出）
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    _handler = logging.StreamHandler()
+    _formatter = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+    )
+    _handler.setFormatter(_formatter)
+    logger.addHandler(_handler)
 
 # 初始化数据库管理器
 db = DatabaseManager()
@@ -197,7 +209,7 @@ def update_all_servers():
                         pass
                 except Exception as e:
                     server = future_to_server[future]
-                    print(f"更新服务器 {server['name']} 时发生错误: {str(e)}")
+                    logger.info(f"更新服务器 {server['name']} 时发生错误: {str(e)}")
             
             time.sleep(30)  # 每30秒更新一次
     finally:
@@ -210,8 +222,8 @@ def execute_ssh_command_silent(server, command, timeout=60):
     server_name = server.get('name', '?')
     code_path = server.get('code_path') or db.get_config(CONFIG_CODE_PATH, '/home')
     full_cmd = f'source ~/.bashrc 2>/dev/null; source ~/.profile 2>/dev/null; cd {code_path} 2>/dev/null; {command}'
-    print(f"[SSH] server={server_name} code_path={code_path}")
-    print(f"[SSH] command= {full_cmd[:500]}{'...' if len(full_cmd) > 500 else ''}")
+    logger.info(f"[SSH] server={server_name} code_path={code_path}")
+    logger.info(f"[SSH] command= {full_cmd[:500]}{'...' if len(full_cmd) > 500 else ''}")
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -221,11 +233,11 @@ def execute_ssh_command_silent(server, command, timeout=60):
         err = stderr.read().decode('utf-8', errors='replace')
         ssh.close()
         combined = out + (('\n' + err) if err else '')
-        print(f"[SSH] server={server_name} ok=True output_preview= {repr(combined[:400])}{'...' if len(combined) > 400 else ''}")
+        logger.info(f"[SSH] server={server_name} ok=True output_preview= {repr(combined[:400])}{'...' if len(combined) > 400 else ''}")
         return True, combined
     except Exception as e:
         err_msg = str(e)
-        print(f"[SSH] server={server_name} ok=False error= {err_msg}")
+        logger.info(f"[SSH] server={server_name} ok=False error= {err_msg}")
         return False, err_msg
 
 
@@ -288,7 +300,7 @@ def freeze_training_script_for_task(task_id, script_path, allowed_servers):
     for srv in servers:
         # 在对应服务器代码目录下复制当前脚本到快照路径
         cmd = f"mkdir -p .cluster_snapshots && cp -f {script_path} {snapshot_rel}"
-        print(f"[Freeze] server={srv['name']} copy cmd= {cmd}")
+        logger.info(f"[Freeze] server={srv['name']} copy cmd= {cmd}")
         ok, out = execute_ssh_command_silent(srv, cmd, timeout=20)
         if not ok:
             errors.append(f"{srv['name']}: {out}")
@@ -300,7 +312,7 @@ def freeze_training_script_for_task(task_id, script_path, allowed_servers):
                     f'训练脚本不存在，无法冻结: {script_path}。错误: {(out or "").strip()[:300]}'
                 )
         else:
-            print(f"[Freeze] server={srv['name']} ok -> snapshot {snapshot_rel}")
+            logger.info(f"[Freeze] server={srv['name']} ok -> snapshot {snapshot_rel}")
 
     if errors:
         return False, '; '.join(errors)
@@ -331,7 +343,7 @@ def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowe
         util_th = int(db.get_config(CONFIG_TRAIN_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
     reserved = int(db.get_config(CONFIG_RESERVED_GPU, 0))
     servers = load_servers()
-    print(f"[Scheduler] find_idle_server_and_gpus task_type={task_type} gpu_count={gpu_count} reserved={reserved} allowed={allowed_servers}")
+    logger.info(f"[Scheduler] find_idle_server_and_gpus task_type={task_type} gpu_count={gpu_count} reserved={reserved} allowed={allowed_servers}")
     if allowed_servers:
         allow_set = set(s.strip() for s in allowed_servers if s and str(s).strip())
         servers = [s for s in servers if s['name'] in allow_set]
@@ -339,12 +351,12 @@ def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowe
         st = server_status.get(srv['name'], {})
         gpu_text = st.get('gpu_status', '')
         idle = find_idle_gpus(gpu_text, mem_threshold=mem_th, util_threshold=util_th, reserved_gpu_count=reserved)
-        print(f"[Scheduler]   server={srv['name']} idle_gpus={idle} (need {gpu_count})")
+        logger.info(f"[Scheduler]   server={srv['name']} idle_gpus={idle} (need {gpu_count})")
         if len(idle) >= gpu_count:
             chosen = idle[:gpu_count]
-            print(f"[Scheduler]   -> choose server={srv['name']} gpus={chosen}")
+            logger.info(f"[Scheduler]   -> choose server={srv['name']} gpus={chosen}")
             return srv, chosen
-    print("[Scheduler]   -> no server has enough GPUs")
+    logger.info("[Scheduler]   -> no server has enough GPUs")
     return None, []
 
 
@@ -362,8 +374,8 @@ def run_training_on_server(task, server, gpu_ids):
     log_path = f"outputs/logs/train_{task['id']}_{int(time.time())}.log"
     runner = 'bash' if script.lower().endswith('.sh') else 'python'
     cmd = f'mkdir -p outputs/logs && CUDA_VISIBLE_DEVICES={gpu_str} nohup {runner} {script} {args} > {log_path} 2>&1 & echo $!'
-    print(f"[RunTrain] task_id={task['id']} server={server['name']} code_path={code_path} script={script} log={log_path}")
-    print(f"[RunTrain] full_cmd= {cmd}")
+    logger.info(f"[RunTrain] task_id={task['id']} server={server['name']} code_path={code_path} script={script} log={log_path}")
+    logger.info(f"[RunTrain] full_cmd= {cmd}")
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
         return False, out
@@ -431,7 +443,7 @@ def cluster_task_scheduler():
                     task_gpu_count = 1
                 if task_gpu_count < 1:
                     task_gpu_count = 1
-                print(f"[Scheduler] try schedule train_task id={task['id']} name={task['name']} gpu_count={task_gpu_count} allowed={allowed}")
+                logger.info(f"[Scheduler] try schedule train_task id={task['id']} name={task['name']} gpu_count={task_gpu_count} allowed={allowed}")
                 server, gpu_ids = find_idle_server_and_gpus(
                     gpu_count=task_gpu_count,
                     reserved=0,
@@ -441,10 +453,10 @@ def cluster_task_scheduler():
                 if server and gpu_ids:
                     ok, msg = run_training_on_server(task, server, gpu_ids)
                     if not ok:
-                        print(f"[Scheduler]   start train_task id={task['id']} FAILED: {msg}")
+                        logger.info(f"[Scheduler]   start train_task id={task['id']} FAILED: {msg}")
                         db.update_training_task(task['id'], status='failed', error_message=str(msg))
                     else:
-                        print(f"[Scheduler]   start train_task id={task['id']} on {server['name']} gpus={gpu_ids} OK")
+                        logger.info(f"[Scheduler]   start train_task id={task['id']} on {server['name']} gpus={gpu_ids} OK")
                     time.sleep(2)  # 避免连续提交过快
             # 测试任务调度（使用测试用阈值，测试对显存/算力要求较低）
             for task in db.get_pending_test_tasks():
@@ -460,7 +472,7 @@ def cluster_task_scheduler():
                             db.update_test_task(task['id'], status='failed', result=str(msg))
                     time.sleep(2)
         except Exception as e:
-            print(f"[Scheduler] Error: {e}")
+            logger.info(f"[Scheduler] Error: {e}")
         time.sleep(10)
 
 
@@ -1186,7 +1198,7 @@ def submit_training_task():
     priority = int(data.get('priority', 5))
     gpu_count = data.get('gpu_count', 1)
     allowed_servers = data.get('allowed_servers')  # 可选，服务器名列表；空/不传表示所有服务器
-    print(f"[API] submit_training_task name={name} script={script_path} args={script_args} priority={priority} gpu_count={gpu_count} allowed_servers={allowed_servers}")
+    logger.info(f"[API] submit_training_task name={name} script={script_path} args={script_args} priority={priority} gpu_count={gpu_count} allowed_servers={allowed_servers}")
     if not name or not script_path:
         return jsonify({'success': False, 'error': '任务名和脚本路径必填'})
     ok, result = db.add_training_task(name, script_path, script_args, priority, gpu_count=gpu_count, allowed_servers=allowed_servers)
