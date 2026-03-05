@@ -324,7 +324,7 @@
             <div class="table-wrap" style="margin-top:16px;">
                 <table>
                     <thead>
-                        <tr><th>ID</th><th>任务名</th><th>脚本</th><th>服务器</th><th>GPU</th><th>状态</th><th>操作</th></tr>
+                        <tr><th>ID</th><th>任务名</th><th>脚本</th><th>服务器</th><th>GPU</th><th>权重</th><th>状态</th><th>操作</th></tr>
                     </thead>
                     <tbody id="train-list"></tbody>
                 </table>
@@ -411,7 +411,7 @@
     <div id="log-modal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
-                <h3>训练日志</h3>
+                <h3 id="log-modal-title">训练日志</h3>
                 <button class="modal-close" onclick="closeLogModal()">&times;</button>
             </div>
             <div id="log-content" class="log-viewer">加载中...</div>
@@ -624,10 +624,24 @@
             return names;
         }
 
+        function prettyPathName(path) {
+            if (!path) return '-';
+            const p = String(path);
+            const name = p.split('/').pop() || p;
+            return name.length > 28 ? name.slice(0, 28) + '...' : name;
+        }
+
+        function renderPathCell(path, label) {
+            if (!path) return '-';
+            const encoded = encodeURIComponent(path);
+            const shortName = prettyPathName(path).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:6px;" onclick="showPathDetail('${label}','${encoded}')">查看</button><code>${shortName}</code>`;
+        }
+
         async function loadTraining() {
             const d = await api('/api/cluster/training/list');
             const tbody = document.getElementById('train-list');
-            if (!d.success) { tbody.innerHTML = '<tr><td colspan="7">加载失败</td></tr>'; return; }
+            if (!d.success) { tbody.innerHTML = '<tr><td colspan="8">加载失败</td></tr>'; return; }
             const statusClass = { pending: 'badge-pending', running: 'badge-running', done: 'badge-done', failed: 'badge-failed', killed: 'badge-killed' };
             const tasks = d.tasks || [];
             const shown = sectionCollapsed.train ? tasks.slice(0, 10) : tasks;
@@ -635,22 +649,23 @@
                 <tr>
                     <td>${t.id}</td>
                     <td>${t.name}</td>
-                    <td>${t.script_path}</td>
+                    <td>${renderPathCell(t.script_path, '脚本路径')}</td>
                     <td>${t.server_name || '-'}</td>
                     <td>${t.gpu_ids || '-'}</td>
+                    <td>${renderPathCell(t.weight_path, '权重路径')}</td>
                     <td><span class="badge ${statusClass[t.status] || 'badge-pending'}">${t.status}</span></td>
                     <td>
                         ${t.log_path ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="viewLog(${t.id})">日志</button>` : ''}
                         ${t.status === 'running' ? `<button class="btn btn-danger" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="killTrain(${t.id})">停止</button>` : ''}
                         ${t.status !== 'running' ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="deleteTrain(${t.id})">删除</button>` : ''}
-                        ${(t.status === 'done' || t.status === 'running') && !t.weight_path ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="recordWeight(${t.id},'${(t.name||'').replace(/'/g,"\\'")}')">记录权重</button>` : ''}
+                        ${(t.status === 'done' || t.status === 'running') ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="recordWeight(${t.id},'${(t.name||'').replace(/'/g,"\\'")}', '${encodeURIComponent(t.weight_path || '')}')">${t.weight_path ? '修改权重' : '记录权重'}</button>` : ''}
                     </td>
                 </tr>
             `).join('');
             if (!rows) {
-                rows = '<tr><td colspan="7">暂无训练任务</td></tr>';
+                rows = '<tr><td colspan="8">暂无训练任务</td></tr>';
             } else if (sectionCollapsed.train && tasks.length > 10) {
-                rows += `<tr><td colspan="7" style="text-align:center;color:#8b949e;font-size:0.8rem;">共 ${tasks.length} 条，仅显示前 10 条，点击“折叠/展开”查看全部</td></tr>`;
+                rows += `<tr><td colspan="8" style="text-align:center;color:#8b949e;font-size:0.8rem;">共 ${tasks.length} 条，仅显示前 10 条，点击“折叠/展开”查看全部</td></tr>`;
             }
             tbody.innerHTML = rows;
         }
@@ -683,11 +698,19 @@
         }
 
         async function viewLog(id) {
+            document.getElementById('log-modal-title').textContent = '训练日志';
             document.getElementById('log-modal').classList.add('show');
             document.getElementById('log-content').textContent = '加载中...';
             const r = await fetch('/api/cluster/training/' + id + '/log');
             const text = await r.text();
             document.getElementById('log-content').textContent = text || '(空)';
+        }
+
+        function showPathDetail(label, encodedPath) {
+            const fullPath = decodeURIComponent(encodedPath || '');
+            document.getElementById('log-modal-title').textContent = label || '路径详情';
+            document.getElementById('log-modal').classList.add('show');
+            document.getElementById('log-content').textContent = fullPath || '(空)';
         }
 
         function closeLogModal() {
@@ -708,15 +731,17 @@
             else showMsg('err', d.error);
         }
 
-        async function recordWeight(id, name) {
-            const path = prompt('请输入权重保存路径（在对应服务器上的绝对路径）：', '/path/to/checkpoint/best.pt');
+        async function recordWeight(id, name, encodedCurrentPath) {
+            const currentPath = decodeURIComponent(encodedCurrentPath || '');
+            const defaultPath = currentPath || '/path/to/checkpoint/best.pt';
+            const path = prompt('请输入权重保存路径（在对应服务器上的绝对路径）：', defaultPath);
             if (!path) return;
             const d = await api('/api/cluster/training/' + id + '/weight', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: path.trim() })
             });
-            if (d.success) { showMsg('ok', '权重已记录'); loadTraining(); loadWeights(); }
+            if (d.success) { showMsg('ok', currentPath ? '权重已修改' : '权重已记录'); loadTraining(); loadWeights(); }
             else showMsg('err', d.error);
         }
 

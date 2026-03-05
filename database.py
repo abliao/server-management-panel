@@ -679,6 +679,33 @@ class DatabaseManager:
                 return True, cursor.lastrowid
         except Exception as e:
             return False, str(e)
+
+    def upsert_model_weight_for_task(self, training_task_id, name, path, server_name, size_mb=None):
+        """按 training_task_id 更新权重记录；不存在则新增。"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    'SELECT id FROM model_weights WHERE training_task_id=? ORDER BY id DESC LIMIT 1',
+                    (training_task_id,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    cursor.execute(
+                        'UPDATE model_weights SET name=?, path=?, server_name=?, size_mb=? WHERE id=?',
+                        (name, path, server_name, size_mb, row[0])
+                    )
+                    conn.commit()
+                    return True, row[0]
+
+                cursor.execute('''
+                    INSERT INTO model_weights (name, path, server_name, training_task_id, size_mb)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (name, path, server_name, training_task_id, size_mb))
+                conn.commit()
+                return True, cursor.lastrowid
+        except Exception as e:
+            return False, str(e)
     
     def get_all_model_weights(self, limit=200):
         try:

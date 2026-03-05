@@ -12,8 +12,8 @@ COMMAND = (
     "source ~/.bashrc 2>/dev/null; "
     "source ~/.profile 2>/dev/null; "
     "cd /mnt/zhangkaidong/A1 2>/dev/null; "
-    "mkdir -p outputs/logs; "
-    "CUDA_VISIBLE_DEVICES=4,5,6,7 nohup bash .cluster_snapshots/train_rc_task52_1772681215.sh  > outputs/logs/train_52_1772681511.log 2>&1 & echo $!"
+    "echo hahah; "
+    # "CUDA_VISIBLE_DEVICES=4,5,6,7 nohup bash .cluster_snapshots/train_rc_task52_1772681215.sh  > outputs/logs/train_52_1772681511.log 2>&1 & echo $!"
     # "> /tmp/train_14_1772594277.log 2>&1 & echo $!"
 )
 

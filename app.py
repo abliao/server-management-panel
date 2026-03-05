@@ -384,6 +384,20 @@ def find_available_port_on_server(server, base=18000):
     return find_available_port(used, base_port=base)
 
 
+def extract_save_folder_from_output(output_text):
+    """仅从返回文本中提取 `save_folder: xxx`。"""
+    text = output_text or ''
+    m = re.search(r'save_folder\s*:\s*(.+)', text, flags=re.IGNORECASE)
+    if not m:
+        return ''
+    raw = (m.group(1) or '').strip()
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        raw = raw[1:-1].strip()
+    if raw.startswith('./'):
+        raw = raw[2:]
+    return raw
+
+
 def run_training_on_server(task, server, gpu_ids):
     """在指定服务器上启动训练任务（支持 .sh 与 .py）"""
     code_path = server.get('code_path') or db.get_config(CONFIG_CODE_PATH, '/home')
@@ -411,6 +425,24 @@ def run_training_on_server(task, server, gpu_ids):
     db.update_training_task(task['id'], server_name=server['name'], gpu_ids=','.join(map(str, gpu_ids)),
                             status='running', log_path=log_path, pid=pid,
                             started_at=datetime.now(CST).isoformat())
+
+    print('out',out)
+    # 启动成功后，仅从返回文本中提取 save_folder 并记录权重路径
+    try:
+        if not (task.get('weight_path') or '').strip():
+            auto_weight_path = extract_save_folder_from_output(out)
+            if auto_weight_path:
+                db.update_training_task(task['id'], weight_path=auto_weight_path)
+                db.upsert_model_weight_for_task(
+                    task['id'],
+                    task.get('name', 'task') + '_' + str(task['id']),
+                    auto_weight_path,
+                    server.get('name', '')
+                )
+                logger.info(f"[RunTrain] task_id={task['id']} auto weight_path from returned save_folder: {auto_weight_path}")
+    except Exception as e:
+        logger.info(f"[RunTrain] task_id={task['id']} auto record weight_path skipped: {e}")
+
     return True, {'pid': pid, 'log_path': log_path}
 
 
@@ -478,6 +510,7 @@ def cluster_task_scheduler():
                     else:
                         logger.info(f"[Scheduler]   start train_task id={task['id']} on {server['name']} gpus={gpu_ids} OK")
                     time.sleep(2)  # 避免连续提交过快
+
             # 测试任务调度（使用测试用阈值，测试对显存/算力要求较低）
             for task in db.get_pending_test_tasks():
                 server, gpu_ids = find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='test')
@@ -1308,8 +1341,22 @@ def record_training_weight(task_id):
     task = db.get_training_task(task_id)
     if not task:
         return jsonify({'success': False, 'error': '任务不存在'})
-    db.update_training_task(task_id, weight_path=path)
-    db.add_model_weight(task.get('name', 'task') + '_' + str(task_id), path, task.get('server_name', ''), task_id)
+    ok = db.update_training_task(task_id, weight_path=path)
+    if not ok:
+        return jsonify({'success': False, 'error': '更新训练任务权重路径失败'})
+
+    server_name = (task.get('server_name') or '').strip()
+    if not server_name:
+        return jsonify({'success': False, 'error': '该任务尚未绑定服务器，无法记录权重，请等待任务启动后再记录'})
+
+    ok, msg = db.upsert_model_weight_for_task(
+        task_id,
+        task.get('name', 'task') + '_' + str(task_id),
+        path,
+        server_name
+    )
+    if not ok:
+        return jsonify({'success': False, 'error': f'写入权重记录失败: {msg}'})
     return jsonify({'success': True})
 
 
