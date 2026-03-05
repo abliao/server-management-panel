@@ -5,16 +5,16 @@ from database import DatabaseManager
 from app import _ssh_connect_params   # 复用你项目里现成的 SSH 参数构造逻辑
 import paramiko
 
-SERVER_NAME = 'wujie_new_3'
+SERVER_NAME = 'wujie_old_1'
 
 # 这里把你要测试的命令写完整（和面板里的保持一致）
 COMMAND = (
     "source ~/.bashrc 2>/dev/null; "
     "source ~/.profile 2>/dev/null; "
-    "cd /data/zhangkaidong/A1 2>/dev/null; "
-    "conda activate a1 && "
-    "CUDA_VISIBLE_DEVICES=2 nohup bash .cluster_snapshots/train_rc_task14_1772594271.sh "
-    "> /tmp/train_14_1772594277.log 2>&1 & echo $!"
+    "cd /mnt/zhangkaidong/A1 2>/dev/null; "
+    "touch /mnt/zhangkaidong/A1/.cluster_snapshots/test.sh"
+    # "CUDA_VISIBLE_DEVICES=2 nohup bash .cluster_snapshots/train_rc_task14_1772594271.sh "
+    # "> /tmp/train_14_1772594277.log 2>&1 & echo $!"
 )
 
 def main():

@@ -206,20 +206,27 @@ def update_all_servers():
 
 # ========== 集群任务调度辅助 ==========
 def execute_ssh_command_silent(server, command, timeout=60):
-    """执行 SSH 命令，返回 (success, output)"""
+    """执行 SSH 命令，返回 (success, output)。会打印执行日志便于排查失败原因。"""
+    server_name = server.get('name', '?')
+    code_path = server.get('code_path') or db.get_config(CONFIG_CODE_PATH, '/home')
+    full_cmd = f'source ~/.bashrc 2>/dev/null; source ~/.profile 2>/dev/null; cd {code_path} 2>/dev/null; {command}'
+    print(f"[SSH] server={server_name} code_path={code_path}")
+    print(f"[SSH] command= {full_cmd[:500]}{'...' if len(full_cmd) > 500 else ''}")
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(**_ssh_connect_params(server))
-        code_path = server.get('code_path') or db.get_config(CONFIG_CODE_PATH, '/home')
-        full_cmd = f'source ~/.bashrc 2>/dev/null; source ~/.profile 2>/dev/null; cd {code_path} 2>/dev/null; {command}'
         stdin, stdout, stderr = ssh.exec_command(full_cmd, timeout=timeout)
         out = stdout.read().decode('utf-8', errors='replace')
         err = stderr.read().decode('utf-8', errors='replace')
         ssh.close()
-        return True, out + (('\n' + err) if err else '')
+        combined = out + (('\n' + err) if err else '')
+        print(f"[SSH] server={server_name} ok=True output_preview= {repr(combined[:400])}{'...' if len(combined) > 400 else ''}")
+        return True, combined
     except Exception as e:
-        return False, str(e)
+        err_msg = str(e)
+        print(f"[SSH] server={server_name} ok=False error= {err_msg}")
+        return False, err_msg
 
 
 def kill_process_group(server, pid, timeout=15):
@@ -281,9 +288,19 @@ def freeze_training_script_for_task(task_id, script_path, allowed_servers):
     for srv in servers:
         # 在对应服务器代码目录下复制当前脚本到快照路径
         cmd = f"mkdir -p .cluster_snapshots && cp -f {script_path} {snapshot_rel}"
+        print(f"[Freeze] server={srv['name']} copy cmd= {cmd}")
         ok, out = execute_ssh_command_silent(srv, cmd, timeout=20)
         if not ok:
             errors.append(f"{srv['name']}: {out}")
+            # 若为源文件不存在，发出警报
+            out_lower = (out or '').lower()
+            if 'no such file or directory' in out_lower or 'cannot stat' in out_lower:
+                db.add_memory_alert(
+                    srv['name'], 'script_not_found',
+                    f'训练脚本不存在，无法冻结: {script_path}。错误: {(out or "").strip()[:300]}'
+                )
+        else:
+            print(f"[Freeze] server={srv['name']} ok -> snapshot {snapshot_rel}")
 
     if errors:
         return False, '; '.join(errors)
@@ -342,9 +359,11 @@ def run_training_on_server(task, server, gpu_ids):
     script = task['script_path']
     args = task.get('script_args') or ''
     gpu_str = ','.join(map(str, gpu_ids))
-    log_path = f"/tmp/train_{task['id']}_{int(time.time())}.log"
+    log_path = f"outputs/logs/train_{task['id']}_{int(time.time())}.log"
     runner = 'bash' if script.lower().endswith('.sh') else 'python'
-    cmd = f'CUDA_VISIBLE_DEVICES={gpu_str} nohup {runner} {script} {args} > {log_path} 2>&1 & echo $!'
+    cmd = f'mkdir -p outputs/logs && CUDA_VISIBLE_DEVICES={gpu_str} nohup {runner} {script} {args} > {log_path} 2>&1 & echo $!'
+    print(f"[RunTrain] task_id={task['id']} server={server['name']} code_path={code_path} script={script} log={log_path}")
+    print(f"[RunTrain] full_cmd= {cmd}")
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
         return False, out
@@ -372,10 +391,10 @@ def run_test_on_server(task, server, gpu_ids, port):
     weight = task.get('weight_path') or ''
     gpu_str = ','.join(map(str, gpu_ids)) if gpu_ids else ''
     env = f'CUDA_VISIBLE_DEVICES={gpu_str}' if gpu_str else ''
-    log_path = f"/tmp/test_{task['id']}_{int(time.time())}.log"
+    log_path = f"outputs/logs/test_{task['id']}_{int(time.time())}.log"
     # 假设测试脚本接受 --port 和 --weight 等参数
     extra = f'--port {port} --weight {weight}' if weight else f'--port {port}'
-    cmd = f'{env} nohup python {script} {args} {extra} > {log_path} 2>&1 & echo $!'
+    cmd = f'mkdir -p outputs/logs && {env} nohup python {script} {args} {extra} > {log_path} 2>&1 & echo $!'
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
         return False, out
