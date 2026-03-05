@@ -550,6 +550,17 @@ class DatabaseManager:
                 return [self._row_to_training_task(row) for row in cursor.fetchall()]
         except Exception:
             return []
+
+    def delete_training_task(self, task_id):
+        """删除训练任务记录"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM training_tasks WHERE id=?', (task_id,))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception:
+            return False
     
     def _row_to_training_task(self, row):
         allowed = []
@@ -626,6 +637,17 @@ class DatabaseManager:
                 return [self._row_to_test_task(row) for row in cursor.fetchall()]
         except Exception:
             return []
+
+    def delete_test_task(self, task_id):
+        """删除测试任务记录"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM test_tasks WHERE id=?', (task_id,))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception:
+            return False
     
     def get_pending_test_tasks(self):
         try:

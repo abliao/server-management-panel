@@ -314,6 +314,7 @@ def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowe
         util_th = int(db.get_config(CONFIG_TRAIN_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
     reserved = int(db.get_config(CONFIG_RESERVED_GPU, 0))
     servers = load_servers()
+    print(f"[Scheduler] find_idle_server_and_gpus task_type={task_type} gpu_count={gpu_count} reserved={reserved} allowed={allowed_servers}")
     if allowed_servers:
         allow_set = set(s.strip() for s in allowed_servers if s and str(s).strip())
         servers = [s for s in servers if s['name'] in allow_set]
@@ -321,8 +322,12 @@ def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowe
         st = server_status.get(srv['name'], {})
         gpu_text = st.get('gpu_status', '')
         idle = find_idle_gpus(gpu_text, mem_threshold=mem_th, util_threshold=util_th, reserved_gpu_count=reserved)
+        print(f"[Scheduler]   server={srv['name']} idle_gpus={idle} (need {gpu_count})")
         if len(idle) >= gpu_count:
-            return srv, idle[:gpu_count]
+            chosen = idle[:gpu_count]
+            print(f"[Scheduler]   -> choose server={srv['name']} gpus={chosen}")
+            return srv, chosen
+    print("[Scheduler]   -> no server has enough GPUs")
     return None, []
 
 
@@ -407,6 +412,7 @@ def cluster_task_scheduler():
                     task_gpu_count = 1
                 if task_gpu_count < 1:
                     task_gpu_count = 1
+                print(f"[Scheduler] try schedule train_task id={task['id']} name={task['name']} gpu_count={task_gpu_count} allowed={allowed}")
                 server, gpu_ids = find_idle_server_and_gpus(
                     gpu_count=task_gpu_count,
                     reserved=0,
@@ -416,7 +422,10 @@ def cluster_task_scheduler():
                 if server and gpu_ids:
                     ok, msg = run_training_on_server(task, server, gpu_ids)
                     if not ok:
+                        print(f"[Scheduler]   start train_task id={task['id']} FAILED: {msg}")
                         db.update_training_task(task['id'], status='failed', error_message=str(msg))
+                    else:
+                        print(f"[Scheduler]   start train_task id={task['id']} on {server['name']} gpus={gpu_ids} OK")
                     time.sleep(2)  # 避免连续提交过快
             # 测试任务调度（使用测试用阈值，测试对显存/算力要求较低）
             for task in db.get_pending_test_tasks():
@@ -1158,6 +1167,7 @@ def submit_training_task():
     priority = int(data.get('priority', 5))
     gpu_count = data.get('gpu_count', 1)
     allowed_servers = data.get('allowed_servers')  # 可选，服务器名列表；空/不传表示所有服务器
+    print(f"[API] submit_training_task name={name} script={script_path} args={script_args} priority={priority} gpu_count={gpu_count} allowed_servers={allowed_servers}")
     if not name or not script_path:
         return jsonify({'success': False, 'error': '任务名和脚本路径必填'})
     ok, result = db.add_training_task(name, script_path, script_args, priority, gpu_count=gpu_count, allowed_servers=allowed_servers)
@@ -1223,6 +1233,20 @@ def kill_training_task(task_id):
     return jsonify({'success': True})
 
 
+@app.route('/api/cluster/training/<int:task_id>/delete', methods=['POST'])
+@require_admin
+def delete_training_task_api(task_id):
+    task = db.get_training_task(task_id)
+    if not task:
+        return jsonify({'success': False, 'error': '任务不存在'})
+    if task.get('status') == 'running':
+        return jsonify({'success': False, 'error': '运行中的任务不能删除，请先停止'})
+    ok = db.delete_training_task(task_id)
+    if not ok:
+        return jsonify({'success': False, 'error': '删除失败'})
+    return jsonify({'success': True})
+
+
 @app.route('/api/cluster/training/<int:task_id>/weight', methods=['POST'])
 @require_admin
 def record_training_weight(task_id):
@@ -1285,6 +1309,20 @@ def kill_test_task(task_id):
     if not killed:
         return jsonify({'success': False, 'error': f'进程仍在运行 (pid={pid})，请手动检查'})
     db.update_test_task(task_id, status='killed', finished_at=datetime.now(CST).isoformat())
+    return jsonify({'success': True})
+
+
+@app.route('/api/cluster/test/<int:task_id>/delete', methods=['POST'])
+@require_admin
+def delete_test_task_api(task_id):
+    task = db.get_test_task(task_id)
+    if not task:
+        return jsonify({'success': False, 'error': '任务不存在'})
+    if task.get('status') == 'running':
+        return jsonify({'success': False, 'error': '运行中的任务不能删除，请先停止'})
+    ok = db.delete_test_task(task_id)
+    if not ok:
+        return jsonify({'success': False, 'error': '删除失败'})
     return jsonify({'success': True})
 
 

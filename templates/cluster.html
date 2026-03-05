@@ -642,6 +642,7 @@
                     <td>
                         ${t.log_path ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="viewLog(${t.id})">日志</button>` : ''}
                         ${t.status === 'running' ? `<button class="btn btn-danger" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="killTrain(${t.id})">停止</button>` : ''}
+                        ${t.status !== 'running' ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="deleteTrain(${t.id})">删除</button>` : ''}
                         ${(t.status === 'done' || t.status === 'running') && !t.weight_path ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="recordWeight(${t.id},'${(t.name||'').replace(/'/g,"\\'")}')">记录权重</button>` : ''}
                     </td>
                 </tr>
@@ -700,6 +701,13 @@
             else showMsg('err', d.error);
         }
 
+        async function deleteTrain(id) {
+            if (!confirm('确定删除该训练任务？此操作不可恢复')) return;
+            const d = await api('/api/cluster/training/' + id + '/delete', { method: 'POST' });
+            if (d.success) { showMsg('ok', '已删除'); loadTraining(); }
+            else showMsg('err', d.error);
+        }
+
         async function recordWeight(id, name) {
             const path = prompt('请输入权重保存路径（在对应服务器上的绝对路径）：', '/path/to/checkpoint/best.pt');
             if (!path) return;
@@ -729,6 +737,7 @@
                     <td><span class="badge ${statusClass[t.status] || 'badge-pending'}">${t.status}</span></td>
                     <td>
                         ${t.status === 'running' ? `<button class="btn btn-danger" style="padding:4px 8px;font-size:0.8rem;" onclick="killTest(${t.id})">停止</button>` : ''}
+                        ${t.status !== 'running' ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="deleteTest(${t.id})">删除</button>` : ''}
                     </td>
                 </tr>
             `).join('');
@@ -763,6 +772,13 @@
             if (!confirm('确定停止该测试任务？')) return;
             const d = await api('/api/cluster/test/' + id + '/kill', { method: 'POST' });
             if (d.success) { showMsg('ok', '已停止'); loadTest(); }
+            else showMsg('err', d.error);
+        }
+
+        async function deleteTest(id) {
+            if (!confirm('确定删除该测试任务？此操作不可恢复')) return;
+            const d = await api('/api/cluster/test/' + id + '/delete', { method: 'POST' });
+            if (d.success) { showMsg('ok', '已删除'); loadTest(); }
             else showMsg('err', d.error);
         }
 
