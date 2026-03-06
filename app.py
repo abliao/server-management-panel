@@ -376,13 +376,16 @@ def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowe
         gpu_text = st.get('gpu_status', '')
         idle = find_idle_gpus(gpu_text, mem_threshold=mem_th, util_threshold=util_th, reserved_gpu_count=reserved)
         
-        # 过滤掉被预占锁的GPU
+        # 过滤掉被预占锁的GPU（锁文件中已包含独立的到期时间戳，无需传入TTL）
         available = []
         for gpu_id in idle:
-            if not check_gpu_locked(srv, gpu_id, lock_ttl):
+            is_locked = check_gpu_locked(srv, gpu_id)
+            if is_locked:
+                logger.info(f"[Scheduler]   server={srv['name']} gpu={gpu_id} is locked, skip")
+            else:
                 available.append(gpu_id)
         
-        logger.info(f"[Scheduler]   server={srv['name']} idle_gpus={idle} available_gpus={available} (need {gpu_count})")
+        logger.info(f"[Scheduler]   server={srv['name']} idle_gpus={idle} available_gpus={available} locked_count={len(idle)-len(available)} (need {gpu_count})")
         if len(available) >= gpu_count:
             chosen = available[:gpu_count]
             logger.info(f"[Scheduler]   -> choose server={srv['name']} gpus={chosen}")
@@ -488,9 +491,10 @@ def cleanup_expired_locks(server):
     execute_ssh_command_silent(server, cmd, timeout=10)
 
 
-def check_gpu_locked(server, gpu_id, ttl_seconds):
+def check_gpu_locked(server, gpu_id):
     """检查GPU是否被预占（不创建锁，只检查）
     锁文件格式: task_id expire_timestamp
+    返回True表示被锁定，False表示可用
     """
     lock_file = f"/tmp/gpu_scheduler_locks/{server['name']}_gpu_{gpu_id}.lock"
     
@@ -507,7 +511,9 @@ def check_gpu_locked(server, gpu_id, ttl_seconds):
     '''
     
     ok, out = execute_ssh_command_silent(server, cmd, timeout=10)
-    return "locked" in out
+    is_locked = "locked" in out if ok else False
+    logger.info(f"[LockCheck] server={server['name']} gpu={gpu_id} locked={is_locked} out={out!r}")
+    return is_locked
 
 
 def extract_port_from_url(url):
