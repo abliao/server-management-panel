@@ -58,6 +58,8 @@ CONFIG_TRAIN_UTIL_THRESHOLD = 'train_gpu_util_threshold'
 CONFIG_TEST_MEM_THRESHOLD = 'test_gpu_mem_threshold'
 CONFIG_TEST_UTIL_THRESHOLD = 'test_gpu_util_threshold'
 CONFIG_RESERVED_GPU = 'reserved_gpu_count'
+CONFIG_GPU_LOCK_TTL_TRAIN = 'gpu_lock_ttl_train_seconds'  # 训练GPU预占锁超时（秒）
+CONFIG_GPU_LOCK_TTL_DEPLOY = 'gpu_lock_ttl_deploy_seconds'  # 部署GPU预占锁超时（秒）
 
 # 验证管理员权限的装饰器
 def require_admin(f):
@@ -358,9 +360,11 @@ def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowe
     if task_type in ('deploy', 'test'):
         mem_th = int(db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
         util_th = int(db.get_config(CONFIG_TEST_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
+        lock_ttl = int(db.get_config(CONFIG_GPU_LOCK_TTL_DEPLOY, 300))
     else:
         mem_th = int(db.get_config(CONFIG_TRAIN_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
         util_th = int(db.get_config(CONFIG_TRAIN_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
+        lock_ttl = int(db.get_config(CONFIG_GPU_LOCK_TTL_TRAIN, 300))
     reserved = int(db.get_config(CONFIG_RESERVED_GPU, 0))
     servers = load_servers()
     logger.info(f"[Scheduler] find_idle_server_and_gpus task_type={task_type} gpu_count={gpu_count} reserved={reserved} allowed={allowed_servers}")
@@ -371,9 +375,16 @@ def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowe
         st = server_status.get(srv['name'], {})
         gpu_text = st.get('gpu_status', '')
         idle = find_idle_gpus(gpu_text, mem_threshold=mem_th, util_threshold=util_th, reserved_gpu_count=reserved)
-        logger.info(f"[Scheduler]   server={srv['name']} idle_gpus={idle} (need {gpu_count})")
-        if len(idle) >= gpu_count:
-            chosen = idle[:gpu_count]
+        
+        # 过滤掉被预占锁的GPU
+        available = []
+        for gpu_id in idle:
+            if not check_gpu_locked(srv, gpu_id, lock_ttl):
+                available.append(gpu_id)
+        
+        logger.info(f"[Scheduler]   server={srv['name']} idle_gpus={idle} available_gpus={available} (need {gpu_count})")
+        if len(available) >= gpu_count:
+            chosen = available[:gpu_count]
             logger.info(f"[Scheduler]   -> choose server={srv['name']} gpus={chosen}")
             return srv, chosen
     logger.info("[Scheduler]   -> no server has enough GPUs")
@@ -404,6 +415,99 @@ def find_available_server(allowed_servers=None):
 def find_available_port_on_server(server, base=18000):
     used = get_used_ports_on_server(server)
     return find_available_port(used, base_port=base)
+
+
+def try_preempt_gpu(server, gpu_id, task_id, ttl_seconds=None, task_type='train'):
+    """
+    尝试远程预占GPU，TTL时间内其他调度器会跳过
+    锁文件格式: task_id expire_timestamp
+    返回: (success: bool, error_msg: str)
+    """
+    if ttl_seconds is None:
+        if task_type in ('deploy', 'test'):
+            ttl_seconds = int(db.get_config(CONFIG_GPU_LOCK_TTL_DEPLOY, 300))
+        else:
+            ttl_seconds = int(db.get_config(CONFIG_GPU_LOCK_TTL_TRAIN, 300))
+    
+    lock_file = f"/tmp/gpu_scheduler_locks/{server['name']}_gpu_{gpu_id}.lock"
+    
+    cmd = f'''
+    mkdir -p /tmp/gpu_scheduler_locks
+    now=$(date +%s)
+    expire=$((now + {ttl_seconds}))
+    
+    # 检查锁是否存在且未过期（比较expire时间戳）
+    if [ -f "{lock_file}" ]; then
+        lock_expire=$(cat "{lock_file}" | awk '{{print $2}}')
+        if [ "$lock_expire" -gt "$now" ] 2>/dev/null; then
+            remain=$((lock_expire - now))
+            echo "locked $remain"
+            exit 0
+        fi
+    fi
+    
+    # 创建新锁（原子操作），写入到期时间戳
+    echo "{task_id} $expire" > "{lock_file}" && echo "success"
+    '''
+    
+    ok, out = execute_ssh_command_silent(server, cmd, timeout=10)
+    
+    if "success" in out:
+        return True, ""
+    elif "locked" in out:
+        remain = out.strip().split()[-1] if len(out.strip().split()) > 1 else "unknown"
+        return False, f"GPU {gpu_id} 被预占（剩余{remain}秒）"
+    return False, f"预占检查失败: {out}"
+
+
+def release_gpu_lock(server, gpu_id):
+    """主动释放GPU预占锁"""
+    lock_file = f"/tmp/gpu_scheduler_locks/{server['name']}_gpu_{gpu_id}.lock"
+    cmd = f"rm -f {lock_file}"
+    execute_ssh_command_silent(server, cmd, timeout=5)
+
+
+def cleanup_expired_locks(server):
+    """清理超时的GPU锁文件
+    锁文件格式: task_id expire_timestamp
+    直接比较expire_timestamp和当前时间
+    """
+    cmd = '''
+    if [ -d /tmp/gpu_scheduler_locks ]; then
+        now=$(date +%s)
+        for lock_file in /tmp/gpu_scheduler_locks/*.lock; do
+            [ -f "$lock_file" ] || continue
+            lock_expire=$(cat "$lock_file" | awk '{print $2}')
+            if [ "$lock_expire" -le "$now" ] 2>/dev/null; then
+                rm -f "$lock_file"
+            fi
+        done
+    fi
+    echo "done"
+    '''
+    execute_ssh_command_silent(server, cmd, timeout=10)
+
+
+def check_gpu_locked(server, gpu_id, ttl_seconds):
+    """检查GPU是否被预占（不创建锁，只检查）
+    锁文件格式: task_id expire_timestamp
+    """
+    lock_file = f"/tmp/gpu_scheduler_locks/{server['name']}_gpu_{gpu_id}.lock"
+    
+    cmd = f'''
+    if [ -f "{lock_file}" ]; then
+        lock_expire=$(cat "{lock_file}" | awk '{{print $2}}')
+        now=$(date +%s)
+        if [ "$lock_expire" -gt "$now" ] 2>/dev/null; then
+            echo "locked"
+            exit 0
+        fi
+    fi
+    echo "available"
+    '''
+    
+    ok, out = execute_ssh_command_silent(server, cmd, timeout=10)
+    return "locked" in out
 
 
 def extract_port_from_url(url):
@@ -454,6 +558,16 @@ def _read_remote_log_with_limit(server, log_path, lines=None):
     else:
         cmd = f'if [ -f {qpath} ]; then cat {qpath}; else echo "(日志文件不存在)"; fi'
     return execute_ssh_command_silent(server, cmd)
+
+
+def _build_log_preamble_cmd(log_path, lines):
+    """生成写入日志头的 shell 片段，先清空日志再逐行写入。"""
+    qlog = shlex.quote(str(log_path))
+    cmds = [f': > {qlog}']
+    for line in (lines or []):
+        cmds.append(f"printf '%s\\n' {shlex.quote(str(line))} >> {qlog}")
+    cmds.append(f"printf '%s\\n' '' >> {qlog}")
+    return '; '.join(cmds)
 
 
 def is_remote_pid_alive(server, pid, timeout=12):
@@ -527,10 +641,25 @@ def run_training_on_server(task, server, gpu_ids):
     code_path = server.get('code_path') or db.get_config(CONFIG_CODE_PATH, '/home')
     script = task['script_path']
     args = task.get('script_args') or ''
+    task_name = (task.get('task_name') or '').strip()
     gpu_str = ','.join(map(str, gpu_ids))
     log_path = f"{str(code_path).rstrip('/')}/outputs/logs/train_{task['id']}_{int(time.time())}.log"
     runner = 'bash' if script.lower().endswith('.sh') else 'python'
-    cmd = f'mkdir -p outputs/logs; CUDA_VISIBLE_DEVICES={gpu_str} nohup {runner} {script} {args} > {log_path} 2>&1 & echo $!'
+    env_prefix = f'CUDA_VISIBLE_DEVICES={gpu_str}' if gpu_str else ''
+    has_task_name_arg = bool(re.search(r'(^|\s)--task_name(?:\s|=)', args))
+    task_name_part = f' --task_name {shlex.quote(task_name)}' if task_name and not has_task_name_arg else ''
+    launch_core = f'{runner} {script} {args}{task_name_part}'.strip()
+    launch_cmd = f'{env_prefix} {launch_core}'.strip()
+    exec_cmd = f'env {env_prefix} {launch_core}'.strip() if env_prefix else launch_core
+    preamble_cmd = _build_log_preamble_cmd(log_path, [
+        f'[START_AT] {datetime.now(CST).isoformat()}',
+        f'[TASK_TYPE] train',
+        f'[TASK_ID] {task["id"]}',
+        f'[SERVER] {server["name"]}',
+        f'[WORKDIR] {code_path}',
+        f'[LAUNCH_CMD] {launch_cmd}'
+    ])
+    cmd = f'mkdir -p outputs/logs; {preamble_cmd}; nohup {exec_cmd} >> {shlex.quote(log_path)} 2>&1 & echo $!'
     logger.info(f"[RunTrain] task_id={task['id']} server={server['name']} code_path={code_path} script={script} log={log_path}")
     logger.info(f"[RunTrain] full_cmd= {cmd}")
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
@@ -580,6 +709,7 @@ def run_test_on_server(task, server, gpu_ids, port):
     mock_task_name = task.get('mock_task_name') or ''
     user_token = task.get('user_token') or ''
     run_id = task.get('run_id') or ''
+    action_nums = task.get('action_nums')
     gpu_str = ','.join(map(str, gpu_ids)) if gpu_ids else ''
     env = f'CUDA_VISIBLE_DEVICES={gpu_str}' if gpu_str else ''
     log_path = f"{str(code_path).rstrip('/')}/outputs/logs/test_{task['id']}_{int(time.time())}.log"
@@ -602,12 +732,29 @@ def run_test_on_server(task, server, gpu_ids, port):
             extra_parts.append(f'--user_token {shlex.quote(str(user_token))}')
         if run_id:
             extra_parts.append(f'--run_id {shlex.quote(str(run_id))}')
+        if action_nums not in (None, ''):
+            try:
+                extra_parts.append(f'--action_nums {int(action_nums)}')
+            except (TypeError, ValueError):
+                logger.info(f"[RunTest] task_id={task['id']} invalid action_nums={action_nums}, skip")
     extra_parts.append(f'--test_type {task_type}')
     extra = ' '.join(extra_parts)
+    launch_core = f'{runner} {script} {args} {extra}'.strip()
+    launch_cmd = f'{env} {launch_core}'.strip()
+    exec_cmd = f'env {env} {launch_core}'.strip() if env else launch_core
+    preamble_cmd = _build_log_preamble_cmd(log_path, [
+        f'[START_AT] {datetime.now(CST).isoformat()}',
+        f'[TASK_TYPE] test',
+        f'[TASK_ID] {task["id"]}',
+        f'[SERVER] {server["name"]}',
+        f'[WORKDIR] {test_code_path}',
+        f'[LAUNCH_CMD] {launch_cmd}'
+    ])
     cmd = (
         f'mkdir -p outputs/logs; '
         f'cd {shlex.quote(str(test_code_path))} 2>/dev/null; '
-        f'{env} nohup {runner} {script} {args} {extra} > {log_path} 2>&1 & echo $!'
+        f'{preamble_cmd}; '
+        f'nohup {exec_cmd} >> {shlex.quote(log_path)} 2>&1 & echo $!'
     )
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
@@ -638,7 +785,18 @@ def run_deploy_on_server(task, server, gpu_ids):
     runner = 'bash' if script.lower().endswith('.sh') else 'python'
     weight_arg = f' --weight {weight}' if weight else ''
     port_arg = f' --port {port}' if port not in (None, '') else ''
-    cmd = f'mkdir -p outputs/logs; {env} nohup {runner} {script}{weight_arg}{port_arg} > {log_path} 2>&1 & echo $!'
+    launch_core = f'{runner} {script}{weight_arg}{port_arg}'.strip()
+    launch_cmd = f'{env} {launch_core}'.strip()
+    exec_cmd = f'env {env} {launch_core}'.strip() if env else launch_core
+    preamble_cmd = _build_log_preamble_cmd(log_path, [
+        f'[START_AT] {datetime.now(CST).isoformat()}',
+        f'[TASK_TYPE] deploy',
+        f'[TASK_ID] {task["id"]}',
+        f'[SERVER] {server["name"]}',
+        f'[WORKDIR] {code_path}',
+        f'[LAUNCH_CMD] {launch_cmd}'
+    ])
+    cmd = f'mkdir -p outputs/logs; {preamble_cmd}; nohup {exec_cmd} >> {shlex.quote(log_path)} 2>&1 & echo $!'
     logger.info(f"[RunDeploy] task_id={task['id']} server={server['name']} script={script} weight={weight} port={port} log={log_path}")
     logger.info(f"[RunDeploy] full_cmd= {cmd}")
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
@@ -667,6 +825,7 @@ def run_deploy_on_server(task, server, gpu_ids):
 
 def cluster_task_scheduler():
     """后台调度：处理待执行的训练和测试任务"""
+    cleanup_counter = 0
     while True:
         try:
             # 先巡检 running 任务，避免进程结束后状态长期停留在 running
@@ -678,6 +837,15 @@ def cluster_task_scheduler():
             if not has_any_code_path:
                 time.sleep(15)
                 continue
+            
+            # 每隔几次循环清理一次过期锁（减少SSH频率）
+            cleanup_counter += 1
+            if cleanup_counter >= 6:  # 约60秒清理一次
+                cleanup_counter = 0
+                # 清理时直接读取每个锁的expire_timestamp判断，无需传入TTL
+                for srv in servers:
+                    cleanup_expired_locks(srv)
+                    logger.info(f"[Scheduler] cleanup expired GPU locks on {srv['name']}")
             # 训练任务调度（使用训练用阈值，根据任务自己的 GPU 数量等待）
             for task in db.get_pending_training_tasks():
                 allowed = task.get('allowed_servers') or []
@@ -695,11 +863,28 @@ def cluster_task_scheduler():
                     allowed_servers=allowed if allowed else None
                 )
                 if server and gpu_ids:
+                    # 先预占GPU，防止并发冲突
+                    preempt_ok = True
+                    for gpu_id in gpu_ids:
+                        ok, err = try_preempt_gpu(server, gpu_id, f"train_{task['id']}", task_type='train')
+                        if not ok:
+                            logger.info(f"[Scheduler]   preempt GPU {gpu_id} failed: {err}")
+                            preempt_ok = False
+                            break
+                    
+                    if not preempt_ok:
+                        # 有GPU被抢占了，跳过，下次调度重试
+                        logger.info(f"[Scheduler]   skip train_task id={task['id']} due to GPU lock conflict")
+                        continue
+                    
                     logger.info(f"[Scheduler]   start train_task id={task['id']} on {server['name']} gpus={gpu_ids} OK")
                     ok, msg = run_training_on_server(task, server, gpu_ids)
                     if not ok:
                         logger.info(f"[Scheduler]   start train_task id={task['id']} FAILED: {msg}")
                         db.update_training_task(task['id'], status='failed', error_message=str(msg))
+                        # 启动失败，释放锁（让其他调度器可以尝试）
+                        for gpu_id in gpu_ids:
+                            release_gpu_lock(server, gpu_id)
                     else:
                         logger.info(f"[Scheduler]   start train_task id={task['id']} on {server['name']} gpus={gpu_ids} OK")
                     time.sleep(2)  # 避免连续提交过快
@@ -722,11 +907,27 @@ def cluster_task_scheduler():
                     )
                     gpu_ids = []
                 if server:
+                    # 有GPU时先预占
+                    preempt_ok = True
+                    for gpu_id in gpu_ids:
+                        ok, err = try_preempt_gpu(server, gpu_id, f"deploy_{task['id']}", task_type='deploy')
+                        if not ok:
+                            logger.info(f"[Scheduler]   preempt GPU {gpu_id} failed: {err}")
+                            preempt_ok = False
+                            break
+                    
+                    if not preempt_ok:
+                        logger.info(f"[Scheduler]   skip deploy_task id={task['id']} due to GPU lock conflict")
+                        continue
+                    
                     logger.info(f"[Scheduler]   start deploy_task id={task['id']} on {server['name']} gpus={gpu_ids}")
                     ok, msg = run_deploy_on_server(task, server, gpu_ids)
                     if not ok:
                         logger.info(f"[Scheduler]   start deploy_task id={task['id']} FAILED: {msg}")
                         db.update_deploy_task(task['id'], status='failed', result=str(msg))
+                        # 启动失败，释放锁
+                        for gpu_id in gpu_ids:
+                            release_gpu_lock(server, gpu_id)
                     else:
                         logger.info(f"[Scheduler]   start deploy_task id={task['id']} on {server['name']} OK")
                     time.sleep(2)
@@ -1445,6 +1646,8 @@ def get_cluster_config():
             'test_gpu_mem_threshold': db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, '20'),
             'test_gpu_util_threshold': db.get_config(CONFIG_TEST_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, '15'),
             'reserved_gpu_count': db.get_config(CONFIG_RESERVED_GPU, '0'),
+            'gpu_lock_ttl_train_seconds': db.get_config(CONFIG_GPU_LOCK_TTL_TRAIN, '300'),
+            'gpu_lock_ttl_deploy_seconds': db.get_config(CONFIG_GPU_LOCK_TTL_DEPLOY, '300'),
         }
     })
 
@@ -1455,7 +1658,7 @@ def set_cluster_config():
     data = request.get_json() or {}
     keys = [CONFIG_CODE_PATH, CONFIG_DATA_PATH, CONFIG_MEM_THRESHOLD, CONFIG_UTIL_THRESHOLD,
             CONFIG_TRAIN_MEM_THRESHOLD, CONFIG_TRAIN_UTIL_THRESHOLD, CONFIG_TEST_MEM_THRESHOLD, CONFIG_TEST_UTIL_THRESHOLD,
-            CONFIG_RESERVED_GPU]
+            CONFIG_RESERVED_GPU, CONFIG_GPU_LOCK_TTL_TRAIN, CONFIG_GPU_LOCK_TTL_DEPLOY]
     for k in keys:
         if k in data:
             db.set_config(k, str(data[k]))
@@ -1468,15 +1671,21 @@ def set_cluster_config():
 def submit_training_task():
     data = request.get_json() or {}
     name = data.get('name', '').strip()
+    task_name = data.get('task_name', '').strip()
     script_path = data.get('script_path', '').strip()
     script_args = data.get('script_args', '')
     priority = int(data.get('priority', 5))
     gpu_count = data.get('gpu_count', 1)
     allowed_servers = data.get('allowed_servers')  # 可选，服务器名列表；空/不传表示所有服务器
-    logger.info(f"[API] submit_training_task name={name} script={script_path} args={script_args} priority={priority} gpu_count={gpu_count} allowed_servers={allowed_servers}")
+    logger.info(f"[API] submit_training_task name={name} task_name={task_name} script={script_path} args={script_args} priority={priority} gpu_count={gpu_count} allowed_servers={allowed_servers}")
     if not name or not script_path:
         return jsonify({'success': False, 'error': '任务名和脚本路径必填'})
-    ok, result = db.add_training_task(name, script_path, script_args, priority, gpu_count=gpu_count, allowed_servers=allowed_servers)
+    if not task_name:
+        return jsonify({'success': False, 'error': 'task_name 必填'})
+    ok, result = db.add_training_task(
+        name, script_path, script_args, priority,
+        gpu_count=gpu_count, allowed_servers=allowed_servers, task_name=task_name
+    )
     if not ok:
         return jsonify({'success': False, 'error': str(result)})
     task_id = result
@@ -1702,6 +1911,7 @@ def record_deploy_port(task_id):
 @require_admin
 def submit_test_task():
     data = request.get_json() or {}
+    logger.info(f"[submit_test_task] 收到请求 data_keys={list(data.keys())} task_type={data.get('task_type')}")
     name = data.get('name', '').strip()
     task_type = data.get('task_type', 'mock')  # mock 或 real
     server_name = data.get('server_name', '').strip()
@@ -1712,6 +1922,15 @@ def submit_test_task():
     mock_task_name = data.get('mock_task_name', '').strip()
     user_token = data.get('user_token', '').strip()
     run_id = data.get('run_id', '').strip()
+    action_nums_raw = data.get('action_nums')
+    action_nums = None
+    if action_nums_raw not in (None, ''):
+        try:
+            action_nums = int(action_nums_raw)
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': 'action_nums 必须为整数'})
+        if action_nums < 1:
+            return jsonify({'success': False, 'error': 'action_nums 必须 >= 1'})
     deploy_task_id_raw = data.get('deploy_task_id')
     deploy_task_id = None
     if deploy_task_id_raw not in (None, ''):
@@ -1736,8 +1955,10 @@ def submit_test_task():
     if not name:
         return jsonify({'success': False, 'error': '任务名必填'})
     if task_type not in ('mock', 'real'):
+        logger.info(f"[submit_test_task] 校验失败 task_type 非法")
         return jsonify({'success': False, 'error': 'task_type 须为 mock 或 real'})
     if not server_name:
+        logger.info(f"[submit_test_task] 校验失败 测试服务器必填")
         return jsonify({'success': False, 'error': '测试服务器必填'})
     if not db.get_server_by_name(server_name):
         return jsonify({'success': False, 'error': '指定测试服务器不存在'})
@@ -1749,8 +1970,13 @@ def submit_test_task():
         return jsonify({'success': False, 'error': 'url 和 task_name 必填'})
     if task_type == 'real':
         if not user_token or not run_id:
+            logger.info(f"[submit_test_task] 校验失败 real 缺少 user_token/run_id")
             return jsonify({'success': False, 'error': 'real 模式需填写 user_token 和 run_id'})
+        if action_nums is None:
+            logger.info(f"[submit_test_task] 校验失败 real 缺少 action_nums")
+            return jsonify({'success': False, 'error': 'real 模式需填写 action_nums'})
 
+    logger.info(f"[submit_test_task] 校验通过 写入 DB name={name} task_type={task_type} server_name={server_name}")
     ok, result = db.add_test_task(
         name=name,
         task_type=task_type,
@@ -1763,10 +1989,13 @@ def submit_test_task():
         mock_task_name=mock_task_name,
         user_token=user_token,
         run_id=run_id,
+        action_nums=action_nums,
         deploy_task_id=deploy_task_id
     )
     if ok:
+        logger.info(f"[submit_test_task] 成功 task_id={result}")
         return jsonify({'success': True, 'task_id': result})
+    logger.info(f"[submit_test_task] DB 写入失败 result={result}")
     return jsonify({'success': False, 'error': str(result)})
 
 

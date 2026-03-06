@@ -264,6 +264,15 @@
                     <label>每机保留卡数</label>
                     <input type="number" id="cfg-reserved" value="0" min="0">
                 </div>
+                <div class="form-group" style="flex:0 0 100%; margin-top:12px;"><strong style="color:#7ee787;">GPU预占锁配置</strong>（防止多用户同时调度冲突）</div>
+                <div class="form-group">
+                    <label>训练预占超时(秒)</label>
+                    <input type="number" id="cfg-gpu-lock-ttl-train" value="300" min="30" max="3600" title="训练任务预占GPU后，在此时间内其他调度器不会抢占该GPU">
+                </div>
+                <div class="form-group">
+                    <label>部署预占超时(秒)</label>
+                    <input type="number" id="cfg-gpu-lock-ttl-deploy" value="300" min="30" max="3600" title="部署任务预占GPU后，在此时间内其他调度器不会抢占该GPU">
+                </div>
                 <div class="form-group" style="display:flex;align-items:flex-end;">
                     <button class="btn btn-primary" onclick="saveConfig()">保存配置</button>
                 </div>
@@ -288,6 +297,10 @@
                 <div class="form-group">
                     <label>任务名</label>
                     <input type="text" id="train-name" placeholder="exp_001">
+                </div>
+                <div class="form-group">
+                    <label>task_name</label>
+                    <input type="text" id="train-task-name" placeholder="search_green_boxes">
                 </div>
                 <div class="form-group">
                     <label>脚本路径(相对代码目录)</label>
@@ -443,8 +456,12 @@
                     <label>Real run_id</label>
                     <input type="text" id="test-run-id" placeholder="run_001">
                 </div>
+                <div class="form-group test-real-field" style="display:none;">
+                    <label>Real action_nums</label>
+                    <input type="number" id="test-action-nums" placeholder="20" min="1">
+                </div>
                 <div class="form-group" style="display:flex;align-items:flex-end;">
-                    <button class="btn btn-primary" onclick="submitTest()">提交测试</button>
+                    <button type="button" class="btn btn-primary" onclick="submitTest()">提交测试</button>
                 </div>
             </div>
             <div class="table-wrap" style="margin-top:16px;">
@@ -512,18 +529,34 @@
         let currentLogMeta = null;
 
         function showMsg(type, text) {
-            const el = document.getElementById('msg');
-            el.style.display = 'block';
-            el.className = 'section ' + (type === 'ok' ? '' : '');
-            el.style.background = type === 'ok' ? '#23863622' : '#da363322';
-            el.style.borderColor = type === 'ok' ? '#238636' : '#da3633';
-            el.textContent = text;
-            setTimeout(() => { el.style.display = 'none'; }, 4000);
+            var msg = text ? String(text) : (type === 'ok' ? '成功' : '错误');
+            try {
+                var el = document.getElementById('msg');
+                if (el) {
+                    el.style.display = 'block';
+                    el.className = 'section ' + (type === 'ok' ? '' : '');
+                    el.style.background = type === 'ok' ? '#23863622' : '#da363322';
+                    el.style.borderColor = type === 'ok' ? '#238636' : '#da3633';
+                    el.textContent = msg;
+                    setTimeout(function() { try { el.style.display = 'none'; } catch (st) {} }, 4000);
+                } else {
+                    alert(msg);
+                }
+            } catch (e) {
+                try { console.error('[showMsg]', e); } catch (c) {}
+                alert(msg);
+            }
         }
 
         async function api(path, opts = {}) {
             const r = await fetch(path, opts);
-            return r.json();
+            const text = await r.text();
+            try {
+                return JSON.parse(text);
+            } catch (e) {
+                if (!r.ok) throw new Error(text && text.length < 300 ? text : `请求失败 ${r.status}`);
+                throw new Error('响应格式错误');
+            }
         }
 
         const sectionCollapsed = {
@@ -537,6 +570,7 @@
             try {
                 const data = {
                     name: payload.name || '',
+                    task_name: payload.task_name || '',
                     script_path: payload.script_path || '',
                     script_args: payload.script_args || '',
                     priority: payload.priority || 5,
@@ -553,6 +587,7 @@
                 if (!raw) { showMsg('err', '暂无上次训练参数'); return; }
                 const d = JSON.parse(raw);
                 document.getElementById('train-name').value = d.name || '';
+                document.getElementById('train-task-name').value = d.task_name || '';
                 document.getElementById('train-script').value = d.script_path || '';
                 document.getElementById('train-args').value = d.script_args || '';
                 document.getElementById('train-priority').value = d.priority || 5;
@@ -581,7 +616,8 @@
                     mock_url: payload.mock_url || '',
                     mock_task_name: payload.mock_task_name || '',
                     user_token: payload.user_token || '',
-                    run_id: payload.run_id || ''
+                    run_id: payload.run_id || '',
+                    action_nums: payload.action_nums || ''
                 };
                 localStorage.setItem(TEST_FORM_KEY, JSON.stringify(data));
             } catch (e) {}
@@ -603,6 +639,7 @@
                 document.getElementById('test-mock-task-name').value = d.mock_task_name || '';
                 document.getElementById('test-user-token').value = d.user_token || '';
                 document.getElementById('test-run-id').value = d.run_id || '';
+                document.getElementById('test-action-nums').value = d.action_nums || '';
                 onTestTypeChange();
                 onTestDeployChange();
                 showMsg('ok', '已填入上次测试参数');
@@ -679,6 +716,8 @@
                 document.getElementById('cfg-test-mem').value = c.test_gpu_mem_threshold || '20';
                 document.getElementById('cfg-test-util').value = c.test_gpu_util_threshold || '15';
                 document.getElementById('cfg-reserved').value = c.reserved_gpu_count || '0';
+                document.getElementById('cfg-gpu-lock-ttl-train').value = c.gpu_lock_ttl_train_seconds || '300';
+                document.getElementById('cfg-gpu-lock-ttl-deploy').value = c.gpu_lock_ttl_deploy_seconds || '300';
             }
         }
 
@@ -691,7 +730,9 @@
                     train_gpu_util_threshold: document.getElementById('cfg-train-util').value,
                     test_gpu_mem_threshold: document.getElementById('cfg-test-mem').value,
                     test_gpu_util_threshold: document.getElementById('cfg-test-util').value,
-                    reserved_gpu_count: document.getElementById('cfg-reserved').value
+                    reserved_gpu_count: document.getElementById('cfg-reserved').value,
+                    gpu_lock_ttl_train_seconds: document.getElementById('cfg-gpu-lock-ttl-train').value,
+                    gpu_lock_ttl_deploy_seconds: document.getElementById('cfg-gpu-lock-ttl-deploy').value
                 })
             });
             if (d.success) showMsg('ok', '配置已保存');
@@ -977,14 +1018,17 @@
 
         async function submitTraining() {
             const name = document.getElementById('train-name').value.trim();
+            const taskName = document.getElementById('train-task-name').value.trim();
             const script = document.getElementById('train-script').value.trim();
             const args = document.getElementById('train-args').value.trim();
             const priority = document.getElementById('train-priority').value;
             const gpuCount = parseInt(document.getElementById('train-gpu-count').value || '1', 10);
             const allowedServers = getTrainSelectedServers();
             if (!name || !script) { showMsg('err', '任务名和脚本路径必填'); return; }
+            if (!taskName) { showMsg('err', 'task_name 必填'); return; }
             const payload = {
                 name,
+                task_name: taskName,
                 script_path: script,
                 script_args: args,
                 priority: parseInt(priority),
@@ -1145,45 +1189,79 @@
         }
 
         async function submitTest() {
-            const name = document.getElementById('test-name').value.trim();
-            const type = document.getElementById('test-type').value;
-            const serverName = document.getElementById('test-server').value.trim();
-            const deployId = document.getElementById('test-deploy-id').value.trim();
-            const testCodePath = document.getElementById('test-code-path').value.trim();
-            const script = document.getElementById('test-script').value.trim();
-            const args = document.getElementById('test-args').value.trim();
-            const mockUrl = document.getElementById('test-mock-url').value.trim();
-            const mockTaskName = document.getElementById('test-mock-task-name').value.trim();
-            const userToken = document.getElementById('test-user-token').value.trim();
-            const runId = document.getElementById('test-run-id').value.trim();
-            if (!name) { showMsg('err', '任务名必填'); return; }
-            if (!serverName) { showMsg('err', '测试服务器必选'); return; }
-            if (!script) { showMsg('err', '脚本路径必填'); return; }
-            if (!testCodePath) { showMsg('err', '测试代码路径必填'); return; }
-            if (!mockUrl || !mockTaskName) { showMsg('err', 'URL 和 task_name 必填'); return; }
-            if (type === 'real' && (!userToken || !runId)) { showMsg('err', 'real 模式需填写 user_token 和 run_id'); return; }
-            const payload = {
-                name,
-                task_type: type,
-                server_name: serverName,
-                deploy_task_id: deployId || null,
-                test_code_path: testCodePath,
-                script_path: script,
-                script_args: args,
-                mock_url: mockUrl,
-                mock_task_name: mockTaskName,
-                user_token: userToken,
-                run_id: runId
-            };
-            // 本地记录上一次测试参数
-            saveLastTestForm(payload);
-            const d = await api('/api/cluster/test/submit', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            if (d.success) { showMsg('ok', '测试任务已提交'); loadTest(); }
-            else showMsg('err', d.error);
+            var errMsg = '';
+            try {
+                console.log('[submitTest] 触发');
+                var name = (document.getElementById('test-name') || {}).value || '';
+                var type = (document.getElementById('test-type') || {}).value || 'mock';
+                name = String(name).trim();
+                var serverName = String((document.getElementById('test-server') || {}).value || '').trim();
+                var deployId = String((document.getElementById('test-deploy-id') || {}).value || '').trim();
+                var testCodePath = String((document.getElementById('test-code-path') || {}).value || '').trim();
+                var script = String((document.getElementById('test-script') || {}).value || '').trim();
+                var args = String((document.getElementById('test-args') || {}).value || '').trim();
+                var mockUrl = String((document.getElementById('test-mock-url') || {}).value || '').trim();
+                var mockTaskName = String((document.getElementById('test-mock-task-name') || {}).value || '').trim();
+                var userToken = String((document.getElementById('test-user-token') || {}).value || '').trim();
+                var runId = String((document.getElementById('test-run-id') || {}).value || '').trim();
+                var actionNumsRaw = '';
+                var anEl = document.getElementById('test-action-nums');
+                if (anEl && anEl.value) actionNumsRaw = String(anEl.value).trim();
+                var actionNums = actionNumsRaw ? parseInt(actionNumsRaw, 10) : null;
+                if (Number.isNaN(actionNums)) actionNums = null;
+
+                if (!name) { showMsg('err', '任务名必填'); return; }
+                if (!serverName) { showMsg('err', '测试服务器必选'); return; }
+                if (!script) { showMsg('err', '脚本路径必填'); return; }
+                if (!testCodePath) { showMsg('err', '测试代码路径必填'); return; }
+                if (!mockUrl || !mockTaskName) { showMsg('err', 'URL 和 task_name 必填'); return; }
+                console.log('[submitTest] type=', type);
+                if (type === 'real') {
+                    if (!userToken || !runId) {
+                        var m = 'real 模式需填写 user_token 和 run_id';
+                        showMsg('err', m);
+                        try { alert(m); } catch (a) {}
+                        return;
+                    }
+                    if (actionNums === null || actionNums < 1) {
+                        var m2 = 'real 模式需填写 action_nums（>=1）';
+                        showMsg('err', m2);
+                        try { alert(m2); } catch (a) {}
+                        return;
+                    }
+                }
+                console.log('[submitTest] name=', name);
+                var payload = {
+                    name: name,
+                    task_type: type,
+                    server_name: serverName,
+                    deploy_task_id: deployId || null,
+                    test_code_path: testCodePath,
+                    script_path: script,
+                    script_args: args,
+                    mock_url: mockUrl,
+                    mock_task_name: mockTaskName,
+                    user_token: userToken,
+                    run_id: runId,
+                    action_nums: type === 'real' ? actionNums : null
+                };
+                console.log('[submitTest] payload=', payload);
+                console.log('[submitTest] 即将请求 POST /api/cluster/test/submit');
+                saveLastTestForm(payload);
+                var d = await api('/api/cluster/test/submit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                console.log('[submitTest] 响应=', d);
+                if (d && d.success) { showMsg('ok', '测试任务已提交'); loadTest(); }
+                else { showMsg('err', (d && d.error) ? d.error : '提交失败'); }
+            } catch (e) {
+                errMsg = (e && e.message) ? e.message : String(e);
+                console.error('[submitTest] 异常', e);
+                showMsg('err', errMsg);
+                try { alert('提交测试失败: ' + errMsg); } catch (a) {}
+            }
         }
 
         async function killTest(id) {

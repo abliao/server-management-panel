@@ -128,6 +128,8 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE training_tasks ADD COLUMN allowed_servers TEXT DEFAULT ''")
             if 'gpu_count' not in train_cols:
                 cursor.execute("ALTER TABLE training_tasks ADD COLUMN gpu_count INTEGER DEFAULT 1")
+            if 'task_name' not in train_cols:
+                cursor.execute("ALTER TABLE training_tasks ADD COLUMN task_name TEXT DEFAULT ''")
             
             # 测试任务表
             cursor.execute('''
@@ -174,6 +176,8 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE test_tasks ADD COLUMN deploy_task_id INTEGER")
             if 'log_path' not in test_cols:
                 cursor.execute("ALTER TABLE test_tasks ADD COLUMN log_path TEXT DEFAULT ''")
+            if 'action_nums' not in test_cols:
+                cursor.execute("ALTER TABLE test_tasks ADD COLUMN action_nums INTEGER")
 
             # 部署任务表
             cursor.execute('''
@@ -530,7 +534,7 @@ class DatabaseManager:
             return False
     
     # ========== 训练任务 ==========
-    def add_training_task(self, name, script_path, script_args='', priority=5, gpu_count=1, allowed_servers=None):
+    def add_training_task(self, name, script_path, script_args='', priority=5, gpu_count=1, allowed_servers=None, task_name=''):
         """allowed_servers: 可选服务器名列表，空/None 表示所有服务器可用；gpu_count: 任务需要的 GPU 数量"""
         try:
             # 规范化 gpu_count
@@ -545,9 +549,9 @@ class DatabaseManager:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO training_tasks (name, script_path, script_args, priority, gpu_ids, status, log_path, weight_path, pid, created_at, started_at, finished_at, error_message, server_name, allowed_servers, gpu_count)
-                    VALUES (?, ?, ?, ?, NULL, 'pending', NULL, NULL, NULL, CURRENT_TIMESTAMP, NULL, NULL, NULL, NULL, ?, ?)
-                ''', (name, script_path, script_args, priority, allowed_str, gpu_count_int))
+                    INSERT INTO training_tasks (name, script_path, script_args, priority, gpu_ids, status, log_path, weight_path, pid, created_at, started_at, finished_at, error_message, server_name, allowed_servers, gpu_count, task_name)
+                    VALUES (?, ?, ?, ?, NULL, 'pending', NULL, NULL, NULL, CURRENT_TIMESTAMP, NULL, NULL, NULL, NULL, ?, ?, ?)
+                ''', (name, script_path, script_args, priority, allowed_str, gpu_count_int, task_name))
                 conn.commit()
                 return True, cursor.lastrowid
         except Exception as e:
@@ -645,23 +649,25 @@ class DatabaseManager:
             'log_path': row[8], 'weight_path': row[9], 'pid': row[10],
             'created_at': row[11], 'started_at': row[12], 'finished_at': row[13], 'error_message': row[14],
             'allowed_servers': allowed,
-            'gpu_count': gpu_count
+            'gpu_count': gpu_count,
+            'task_name': row[17] if len(row) > 17 else ''
         }
     
     # ========== 测试任务 ==========
     def add_test_task(self, name, task_type, server_name='', script_path='', script_args='', training_task_id=None,
-                      test_code_path='', mock_url='', mock_task_name='', user_token='', run_id='', deploy_task_id=None):
+                      test_code_path='', mock_url='', mock_task_name='', user_token='', run_id='',
+                      action_nums=None, deploy_task_id=None):
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO test_tasks (
                         name, task_type, server_name, script_path, script_args, training_task_id, status,
-                        test_code_path, mock_url, mock_task_name, user_token, run_id, deploy_task_id
+                        test_code_path, mock_url, mock_task_name, user_token, run_id, action_nums, deploy_task_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
                 ''', (name, task_type, server_name, script_path, script_args, training_task_id,
-                      test_code_path, mock_url, mock_task_name, user_token, run_id, deploy_task_id))
+                      test_code_path, mock_url, mock_task_name, user_token, run_id, action_nums, deploy_task_id))
                 conn.commit()
                 return True, cursor.lastrowid
         except Exception as e:
@@ -752,6 +758,7 @@ class DatabaseManager:
             'run_id': row[20] if len(row) > 20 else '',
             'deploy_task_id': row[21] if len(row) > 21 else None,
             'log_path': row[22] if len(row) > 22 else '',
+            'action_nums': row[23] if len(row) > 23 else None,
         }
 
     # ========== 部署任务 ==========
