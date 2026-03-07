@@ -273,6 +273,12 @@
                     <label>部署预占超时(秒)</label>
                     <input type="number" id="cfg-gpu-lock-ttl-deploy" value="300" min="30" max="3600" title="部署任务预占GPU后，在此时间内其他调度器不会抢占该GPU">
                 </div>
+                <div class="form-group" style="flex:0 0 100%; margin-top:12px;"><strong style="color:#7ee787;">服务器分组配置</strong>（按逗号分隔分组名）</div>
+                <div class="form-group" style="flex:0 0 100%;">
+                    <label>分组列表</label>
+                    <input type="text" id="cfg-server-groups" placeholder="例如: A100集群, V100集群, 测试集群" style="width:100%;">
+                    <span style="color:#8b949e;font-size:0.8rem;">定义服务器分组，用于快速选择同组服务器</span>
+                </div>
                 <div class="form-group" style="display:flex;align-items:flex-end;">
                     <button class="btn btn-primary" onclick="saveConfig()">保存配置</button>
                 </div>
@@ -331,6 +337,7 @@
                     <div style="margin-top:6px;">
                         <button type="button" class="btn btn-secondary" style="padding:4px 10px;font-size:0.8rem;" onclick="trainServerSelectAll()">全选</button>
                         <button type="button" class="btn btn-secondary" style="padding:4px 10px;font-size:0.8rem;margin-left:8px;" onclick="trainServerSelectNone()">清空</button>
+                        <span id="train-group-buttons" style="margin-left:12px;"></span>
                     </div>
                 </div>
             </div>
@@ -393,6 +400,7 @@
                     <div style="margin-top:6px;">
                         <button type="button" class="btn btn-secondary" style="padding:4px 10px;font-size:0.8rem;" onclick="deployServerSelectAll()">全选</button>
                         <button type="button" class="btn btn-secondary" style="padding:4px 10px;font-size:0.8rem;margin-left:8px;" onclick="deployServerSelectNone()">清空</button>
+                        <span id="deploy-group-buttons" style="margin-left:12px;"></span>
                     </div>
                 </div>
             </div>
@@ -539,6 +547,9 @@
         let testTaskCache = new Map();
         // 训练任务缓存，用于部署任务关联训练任务
         let trainTaskCacheForDeploy = [];
+        // 服务器分组信息
+        let serverGroups = [];  // 分组名称列表
+        let serverToGroup = new Map();  // 服务器名到分组的映射
 
         function showMsg(type, text) {
             var msg = text ? String(text) : (type === 'ok' ? '成功' : '错误');
@@ -867,10 +878,23 @@
                 document.getElementById('cfg-reserved').value = c.reserved_gpu_count || '0';
                 document.getElementById('cfg-gpu-lock-ttl-train').value = c.gpu_lock_ttl_train_seconds || '300';
                 document.getElementById('cfg-gpu-lock-ttl-deploy').value = c.gpu_lock_ttl_deploy_seconds || '300';
+                document.getElementById('cfg-server-groups').value = c.server_groups || '';
+                // 解析分组配置
+                parseServerGroups(c.server_groups || '');
             }
         }
 
+        function parseServerGroups(groupsStr) {
+            if (!groupsStr || !groupsStr.trim()) {
+                serverGroups = [];
+                return;
+            }
+            serverGroups = groupsStr.split(',').map(g => g.trim()).filter(g => g);
+        }
+
         async function saveConfig() {
+            const groupsStr = document.getElementById('cfg-server-groups').value || '';
+            parseServerGroups(groupsStr);
             const d = await api('/api/cluster/config', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -881,10 +905,15 @@
                     test_gpu_util_threshold: document.getElementById('cfg-test-util').value,
                     reserved_gpu_count: document.getElementById('cfg-reserved').value,
                     gpu_lock_ttl_train_seconds: document.getElementById('cfg-gpu-lock-ttl-train').value,
-                    gpu_lock_ttl_deploy_seconds: document.getElementById('cfg-gpu-lock-ttl-deploy').value
+                    gpu_lock_ttl_deploy_seconds: document.getElementById('cfg-gpu-lock-ttl-deploy').value,
+                    server_groups: groupsStr
                 })
             });
-            if (d.success) showMsg('ok', '配置已保存');
+            if (d.success) {
+                showMsg('ok', '配置已保存');
+                // 刷新服务器列表以更新分组按钮
+                loadIdleGpus();
+            }
             else showMsg('err', d.error);
         }
 
@@ -901,14 +930,22 @@
                 el.innerHTML = '<p style="color:#8b949e;">暂无服务器</p>';
                 return;
             }
+            // 更新服务器到分组的映射
+            serverToGroup.clear();
+            d.servers.forEach(s => {
+                if (s.server_group) {
+                    serverToGroup.set(s.server, s.server_group);
+                }
+            });
             el.innerHTML = `<div class="idle-gpu-grid">${d.servers.map(s => {
                 const trainIds = s.train_idle_gpus || [];
                 const deployIds = s.deploy_idle_gpus || s.test_idle_gpus || s.idle_gpus || [];
                 const total = s.total_gpus;
                 const isError = s.connection_error && total === 0;
+                const groupLabel = s.server_group ? `<span style="font-size:0.75rem;color:#58a6ff;margin-left:8px;">[${s.server_group}]</span>` : '';
                 return `
                 <div class="idle-gpu-card ${isError ? 'error' : ''}">
-                    <div class="server-name"><i class="fas fa-server"></i>${s.server}</div>
+                    <div class="server-name"><i class="fas fa-server"></i>${s.server}${groupLabel}</div>
                     <div class="gpu-row">
                         <span class="gpu-label">训练</span>
                         <div class="gpu-value">${renderGpuChips(trainIds)}</div>
@@ -920,9 +957,12 @@
                     <div class="gpu-total ${isError ? 'error' : ''}">共 <strong>${isError ? '连接失败' : total + ' 张 GPU'}</strong></div>
                 </div>`;
             }).join('')}</div>`;
-            updateTrainServerChoices(d.servers.map(s => s.server));
-            updateDeployServerChoices(d.servers.map(s => s.server));
-            updateTestServerChoices(d.servers.map(s => s.server));
+            const serverNames = d.servers.map(s => s.server);
+            updateTrainServerChoices(serverNames);
+            updateDeployServerChoices(serverNames);
+            updateTestServerChoices(serverNames);
+            // 更新分组按钮
+            updateGroupButtons();
         }
 
         function updateTrainServerChoices(serverNames) {
@@ -965,10 +1005,35 @@
             document.querySelectorAll('.train-server-cb').forEach(cb => cb.checked = false);
         }
 
+        function trainServerSelectGroup(groupName) {
+            document.querySelectorAll('.train-server-cb').forEach(cb => {
+                const serverName = cb.value;
+                const serverGroup = serverToGroup.get(serverName);
+                cb.checked = serverGroup === groupName;
+            });
+        }
+
         function getTrainSelectedServers() {
             const checked = document.querySelectorAll('.train-server-cb:checked');
             const names = Array.from(checked).map(cb => cb.value.trim()).filter(Boolean);
             return names;
+        }
+
+        function updateGroupButtons() {
+            // 生成训练任务的分组按钮
+            const trainBtnContainer = document.getElementById('train-group-buttons');
+            if (trainBtnContainer && serverGroups.length > 0) {
+                trainBtnContainer.innerHTML = serverGroups.map(group =>
+                    `<button type="button" class="btn btn-secondary" style="padding:4px 10px;font-size:0.8rem;margin-right:4px;" onclick="trainServerSelectGroup('${group.replace(/'/g, "\\'")}')">组:${group}</button>`
+                ).join('');
+            }
+            // 生成部署任务的分组按钮
+            const deployBtnContainer = document.getElementById('deploy-group-buttons');
+            if (deployBtnContainer && serverGroups.length > 0) {
+                deployBtnContainer.innerHTML = serverGroups.map(group =>
+                    `<button type="button" class="btn btn-secondary" style="padding:4px 10px;font-size:0.8rem;margin-right:4px;" onclick="deployServerSelectGroup('${group.replace(/'/g, "\\'")}')">组:${group}</button>`
+                ).join('');
+            }
         }
 
         function updateDeployServerChoices(serverNames) {
@@ -1009,6 +1074,14 @@
 
         function deployServerSelectNone() {
             document.querySelectorAll('.deploy-server-cb').forEach(cb => cb.checked = false);
+        }
+
+        function deployServerSelectGroup(groupName) {
+            document.querySelectorAll('.deploy-server-cb').forEach(cb => {
+                const serverName = cb.value;
+                const serverGroup = serverToGroup.get(serverName);
+                cb.checked = serverGroup === groupName;
+            });
         }
 
         function getDeploySelectedServers() {
@@ -1104,6 +1177,7 @@
             const id = (el && el.value ? el.value : '').trim();
             if (!id) return;
             const task = trainTaskCacheForDeploy.find(t => String(t.id) === id);
+
             if (!task) return;
             // 如果权重路径为空，自动填充训练任务的权重
             const weightInput = document.getElementById('deploy-weight');
@@ -1114,6 +1188,14 @@
             const nameInput = document.getElementById('deploy-name');
             if (task.name && (!nameInput.value || nameInput.value.trim() === '')) {
                 nameInput.value = task.name;
+            }
+            // 自动选择与训练任务服务器同组的服务器
+            if (task.server_name) {
+                const trainServerGroup = serverToGroup.get(task.server_name);
+                if (trainServerGroup) {
+                    deployServerSelectGroup(trainServerGroup);
+                    showMsg('ok', `已自动选择"${trainServerGroup}"组的服务器`);
+                }
             }
         }
 

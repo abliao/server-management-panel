@@ -60,6 +60,7 @@ CONFIG_TEST_UTIL_THRESHOLD = 'test_gpu_util_threshold'
 CONFIG_RESERVED_GPU = 'reserved_gpu_count'
 CONFIG_GPU_LOCK_TTL_TRAIN = 'gpu_lock_ttl_train_seconds'  # 训练GPU预占锁超时（秒）
 CONFIG_GPU_LOCK_TTL_DEPLOY = 'gpu_lock_ttl_deploy_seconds'  # 部署GPU预占锁超时（秒）
+CONFIG_SERVER_GROUPS = 'server_groups'  # 服务器分组配置
 
 # 验证管理员权限的装饰器
 def require_admin(f):
@@ -1452,6 +1453,7 @@ def add_server():
     data_path = data.get('data_path', '')
     auth_type = data.get('auth_type', 'password')
     key_path = data.get('key_path', '')
+    server_group = data.get('server_group', '')
     
     # 验证必填字段
     if not all([name, ip, username]):
@@ -1470,7 +1472,20 @@ def add_server():
     if not isinstance(port, int) or port < 1 or port > 65535:
         return jsonify({'success': False, 'error': '端口号必须在1-65535之间'})
     
-    success, message = db.add_server(name, ip, port, username, password or '', description, dedicated_password, code_path, data_path, auth_type, key_path)
+    success, message = db.add_server(
+        name,
+        ip,
+        port,
+        username,
+        password or '',
+        description,
+        dedicated_password,
+        code_path,
+        data_path,
+        auth_type,
+        key_path,
+        server_group
+    )
     return jsonify({'success': success, 'message': message if success else message})
 
 @app.route('/api/admin/servers/<int:server_id>', methods=['PUT'])
@@ -1503,7 +1518,8 @@ def update_server(server_id):
         code_path=data.get('code_path') if 'code_path' in data else None,
         data_path=data.get('data_path') if 'data_path' in data else None,
         auth_type=data.get('auth_type') if 'auth_type' in data else None,
-        key_path=data.get('key_path') if 'key_path' in data else None
+        key_path=data.get('key_path') if 'key_path' in data else None,
+        server_group=data.get('server_group') if 'server_group' in data else None
     )
     
     return jsonify({'success': success, 'message': message})
@@ -1712,6 +1728,7 @@ def get_cluster_config():
             'reserved_gpu_count': db.get_config(CONFIG_RESERVED_GPU, '0'),
             'gpu_lock_ttl_train_seconds': db.get_config(CONFIG_GPU_LOCK_TTL_TRAIN, '300'),
             'gpu_lock_ttl_deploy_seconds': db.get_config(CONFIG_GPU_LOCK_TTL_DEPLOY, '300'),
+            'server_groups': db.get_config(CONFIG_SERVER_GROUPS, ''),
         }
     })
 
@@ -1722,7 +1739,7 @@ def set_cluster_config():
     data = request.get_json() or {}
     keys = [CONFIG_CODE_PATH, CONFIG_DATA_PATH, CONFIG_MEM_THRESHOLD, CONFIG_UTIL_THRESHOLD,
             CONFIG_TRAIN_MEM_THRESHOLD, CONFIG_TRAIN_UTIL_THRESHOLD, CONFIG_TEST_MEM_THRESHOLD, CONFIG_TEST_UTIL_THRESHOLD,
-            CONFIG_RESERVED_GPU, CONFIG_GPU_LOCK_TTL_TRAIN, CONFIG_GPU_LOCK_TTL_DEPLOY]
+            CONFIG_RESERVED_GPU, CONFIG_GPU_LOCK_TTL_TRAIN, CONFIG_GPU_LOCK_TTL_DEPLOY, CONFIG_SERVER_GROUPS]
     for k in keys:
         if k in data:
             db.set_config(k, str(data[k]))
@@ -2212,11 +2229,16 @@ def list_alerts():
 @app.route('/api/cluster/servers/idle-gpus')
 @require_admin
 def get_idle_gpus():
-    """获取各服务器空闲 GPU 信息（分别展示训练用、部署用空闲卡）"""
+    """获取各服务器空闲 GPU 信息（分别展示训练用、部署用空闲卡），并返回服务器分组信息"""
     train_mem = int(db.get_config(CONFIG_TRAIN_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
     train_util = int(db.get_config(CONFIG_TRAIN_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
     deploy_mem = int(db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
     deploy_util = int(db.get_config(CONFIG_TEST_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
+
+    # 读取服务器分组信息
+    all_servers = db.get_all_servers()
+    name_to_group = {s['name']: (s.get('server_group') or '') for s in all_servers}
+
     result = []
     for srv_name, st in server_status.items():
         gpu_text = st.get('gpu_status', '') or ''
@@ -2233,7 +2255,8 @@ def get_idle_gpus():
             'total_gpus': len(gpus),
             'gpus': gpus,
             'connection_error': is_error,
-            'gpu_status_preview': gpu_text[:80].replace('\n', ' ') if is_error else ''
+            'gpu_status_preview': gpu_text[:80].replace('\n', ' ') if is_error else '',
+            'server_group': name_to_group.get(srv_name, '')
         })
     return jsonify({'success': True, 'servers': result})
 

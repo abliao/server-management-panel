@@ -65,7 +65,8 @@ class DatabaseManager:
                     code_path TEXT DEFAULT '',
                     data_path TEXT DEFAULT '',
                     auth_type TEXT DEFAULT 'password',
-                    key_path TEXT DEFAULT ''
+                    key_path TEXT DEFAULT '',
+                    server_group TEXT DEFAULT ''
                 )
             ''')
             # 迁移：为旧表添加 code_path, data_path 列
@@ -79,7 +80,9 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE servers ADD COLUMN auth_type TEXT DEFAULT 'password'")
             if 'key_path' not in cols:
                 cursor.execute("ALTER TABLE servers ADD COLUMN key_path TEXT DEFAULT ''")
-            
+            if 'server_group' not in cols:
+                cursor.execute("ALTER TABLE servers ADD COLUMN server_group TEXT DEFAULT ''")
+
             # 创建管理员表
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS admin_users (
@@ -245,20 +248,20 @@ class DatabaseManager:
             
             conn.commit()
     
-    def add_server(self, name, ip, port, username, password, description='', dedicated_password=None, code_path='', data_path='', auth_type='password', key_path=''):
+    def add_server(self, name, ip, port, username, password, description='', dedicated_password=None, code_path='', data_path='', auth_type='password', key_path='', server_group=''):
         """添加服务器"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                
+
                 # 只加密用户名，密码和专用密码明文存储
                 encrypted_username = self.encrypt_data(username)
-                
+
                 cursor.execute('''
-                    INSERT INTO servers (name, ip, port, username, password, dedicated_password, description, code_path, data_path, auth_type, key_path)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (name, ip, port, encrypted_username, password, dedicated_password, description, code_path or '', data_path or '', auth_type or 'password', key_path or ''))
-                
+                    INSERT INTO servers (name, ip, port, username, password, dedicated_password, description, code_path, data_path, auth_type, key_path, server_group)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (name, ip, port, encrypted_username, password, dedicated_password, description, code_path or '', data_path or '', auth_type or 'password', key_path or '', server_group or ''))
+
                 conn.commit()
                 return True, "服务器添加成功"
         except sqlite3.IntegrityError:
@@ -273,7 +276,7 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 cursor.execute('SELECT * FROM servers ORDER BY name')
                 rows = cursor.fetchall()
-                
+
                 servers = []
                 for row in rows:
                     server = {
@@ -291,9 +294,10 @@ class DatabaseManager:
                         'data_path': row[11] if len(row) > 11 and row[11] else '',
                         'auth_type': row[12] if len(row) > 12 and row[12] else 'password',
                         'key_path': row[13] if len(row) > 13 and row[13] else '',
+                        'server_group': row[14] if len(row) > 14 and row[14] else '',
                     }
                     servers.append(server)
-                
+
                 return servers
         except Exception as e:
             print(f"获取服务器列表失败: {str(e)}")
@@ -306,7 +310,7 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 cursor.execute('SELECT * FROM servers WHERE name = ?', (name,))
                 row = cursor.fetchone()
-                
+
                 if row:
                     return {
                         'id': row[0],
@@ -323,84 +327,89 @@ class DatabaseManager:
                         'data_path': row[11] if len(row) > 11 and row[11] else '',
                         'auth_type': row[12] if len(row) > 12 and row[12] else 'password',
                         'key_path': row[13] if len(row) > 13 and row[13] else '',
+                        'server_group': row[14] if len(row) > 14 and row[14] else '',
                     }
                 return None
         except Exception as e:
             print(f"获取服务器失败: {str(e)}")
             return None
     
-    def update_server(self, server_id, name=None, ip=None, port=None, username=None, password=None, description=None, dedicated_password=None, code_path=None, data_path=None, auth_type=None, key_path=None):
+    def update_server(self, server_id, name=None, ip=None, port=None, username=None, password=None, description=None, dedicated_password=None, code_path=None, data_path=None, auth_type=None, key_path=None, server_group=None):
         """更新服务器信息"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                
+
                 # 构建更新语句
                 update_fields = []
                 values = []
-                
+
                 if name is not None:
                     update_fields.append('name = ?')
                     values.append(name)
-                
+
                 if ip is not None:
                     update_fields.append('ip = ?')
                     values.append(ip)
-                
+
                 if port is not None:
                     update_fields.append('port = ?')
                     values.append(port)
-                
+
                 if username is not None:
                     update_fields.append('username = ?')
                     values.append(self.encrypt_data(username))
-                
+
                 if password is not None:
                     update_fields.append('password = ?')
                     values.append(password)  # 明文存储
-                
+
                 if dedicated_password is not None:
                     if dedicated_password == '':
                         update_fields.append('dedicated_password = NULL')
                     else:
                         update_fields.append('dedicated_password = ?')
                         values.append(dedicated_password)  # 明文存储
-                
+
                 if description is not None:
                     update_fields.append('description = ?')
                     values.append(description)
-                
+
                 if code_path is not None:
                     update_fields.append('code_path = ?')
                     values.append(code_path)
-                
+
                 if data_path is not None:
                     update_fields.append('data_path = ?')
                     values.append(data_path)
-                
+
                 if auth_type is not None:
                     update_fields.append('auth_type = ?')
                     values.append(auth_type)
-                
+
                 if key_path is not None:
                     update_fields.append('key_path = ?')
                     values.append(key_path)
-                
+
+                if server_group is not None:
+                    update_fields.append('server_group = ?')
+                    values.append(server_group)
+
                 update_fields.append('updated_at = CURRENT_TIMESTAMP')
                 values.append(server_id)
-                
+
                 if update_fields:
                     sql = f"UPDATE servers SET {', '.join(update_fields)} WHERE id = ?"
                     cursor.execute(sql, values)
                     conn.commit()
-                    
+
                     if cursor.rowcount > 0:
                         return True, "服务器更新成功"
                     else:
                         return False, "服务器不存在"
-                
+
                 return False, "没有提供更新字段"
-        
+
         except sqlite3.IntegrityError:
             return False, "服务器名称已存在"
         except Exception as e:

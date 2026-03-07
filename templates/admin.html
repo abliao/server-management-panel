@@ -544,6 +544,14 @@
                     <input type="text" id="server-data-path" placeholder="/data（该服务器上的数据目录）">
                 </div>
 
+                <div class="form-group">
+                    <label for="server-group">服务器分组</label>
+                    <input type="text" id="server-group" placeholder="如：A100集群（先在集群管理配置分组列表）">
+                    <small style="color: hsl(210, 20%, 75%); font-size: 0.8em; margin-top: 5px; display: block;">
+                        用于在集群管理中按组快速选择服务器
+                    </small>
+                </div>
+
                 <div class="form-actions">
                     <button type="button" class="btn btn-secondary" onclick="closeServerModal()">取消</button>
                     <button type="submit" class="btn btn-primary" id="submit-btn">
@@ -734,6 +742,7 @@
                             <th>端口</th>
                             <th>用户名</th>
                             <th>认证</th>
+                            <th>分组</th>
                             <th>代码路径</th>
                             <th>数据路径</th>
                             <th>描述</th>
@@ -749,6 +758,7 @@
                                 <td>${server.port}</td>
                                 <td>${server.username}</td>
                                 <td>${server.auth_type === 'key' ? '密钥' : '密码'}</td>
+                                <td><span style="color: hsl(210, 40%, 75%);">${server.server_group || '-'}</span></td>
                                 <td><code style="font-size:0.8em">${server.code_path || '-'}</code></td>
                                 <td><code style="font-size:0.8em">${server.data_path || '-'}</code></td>
                                 <td>${server.description || '-'}</td>
@@ -809,7 +819,8 @@
             document.getElementById('server-data-path').value = server.data_path || '';
             document.getElementById('server-auth-type').value = server.auth_type || 'password';
             document.getElementById('server-key-path').value = server.key_path || '';
-            
+            document.getElementById('server-group').value = server.server_group || '';
+
             document.getElementById('server-modal').style.display = 'flex';
             toggleAuthFields();
         }
@@ -841,7 +852,8 @@
                 code_path: document.getElementById('server-code-path').value,
                 data_path: document.getElementById('server-data-path').value,
                 auth_type: document.getElementById('server-auth-type').value,
-                key_path: document.getElementById('server-key-path').value
+                key_path: document.getElementById('server-key-path').value,
+                server_group: document.getElementById('server-group').value
             };
 
             try {
