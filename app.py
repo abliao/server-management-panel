@@ -560,7 +560,7 @@ def _read_remote_log_with_limit(server, log_path, lines=None):
         except (TypeError, ValueError):
             n = None
     if n is not None and n > 0:
-        cmd = f'if [ -f {qpath} ]; then tail -n {n} {qpath}; else echo "(日志文件不存在)"; fi'
+        cmd = f'if [ -f {qpath} ]; then head -n {n} {qpath}; else echo "(日志文件不存在)"; fi'
     else:
         cmd = f'if [ -f {qpath} ]; then cat {qpath}; else echo "(日志文件不存在)"; fi'
     return execute_ssh_command_silent(server, cmd)
@@ -592,8 +592,37 @@ def is_remote_pid_alive(server, pid, timeout=12):
     return (out or '').strip() == str(pid_int)
 
 
+def extract_weight_from_log(log_content):
+    """从日志内容中提取权重路径，支持格式: [save_folder] /path/to/folder"""
+    if not log_content:
+        return None
+    # 匹配 [save_folder] 开头的行
+    m = re.search(r'^\[save_folder\]\s*(.+)$', log_content, re.MULTILINE | re.IGNORECASE)
+    if m:
+        path = m.group(1).strip()
+        # 去除可能的引号
+        if (path.startswith('"') and path.endswith('"')) or (path.startswith("'") and path.endswith("'")):
+            path = path[1:-1].strip()
+        return path if path else None
+    return None
+
+
+def extract_port_from_log(log_content):
+    """从日志内容中提取端口号，支持格式: Starting API server on port XXXX"""
+    if not log_content:
+        return None
+    # 匹配 "Starting API server on port XXXX" 格式
+    m = re.search(r'Starting API server on port\s+(\d+)', log_content, re.IGNORECASE)
+    if m:
+        port = int(m.group(1))
+        if 1 <= port <= 65535:
+            return port
+    return None
+
+
 def reconcile_running_tasks():
-    """巡检 running 任务，若远程 PID 已结束则自动置为 done。"""
+    """巡检 running 任务，若远程 PID 已结束则自动置为 done。
+    同时自动从日志提取权重路径和端口号（如果尚未记录）。"""
     now = datetime.now(CST).isoformat()
 
     for task in db.get_running_training_tasks():
@@ -611,6 +640,23 @@ def reconcile_running_tasks():
         elif alive is None:
             logger.info(f"[Health] training task_id={task['id']} pid={pid} check failed, keep running")
 
+        # 自动从日志提取权重路径（如果尚未记录）
+        if alive is not False and not (task.get('weight_path') or '').strip():
+            log_path = task.get('log_path')
+            if log_path:
+                ok, content = _read_remote_log_with_limit(server, log_path, lines=100)
+                if ok:
+                    weight_path = extract_weight_from_log(content)
+                    if weight_path:
+                        db.update_training_task(task['id'], weight_path=weight_path)
+                        db.upsert_model_weight_for_task(
+                            task['id'],
+                            task.get('name', 'task') + '_' + str(task['id']),
+                            weight_path,
+                            server_name
+                        )
+                        logger.info(f"[AutoExtract] training task_id={task['id']} weight_path={weight_path}")
+
     for task in db.get_running_deploy_tasks():
         server_name = (task.get('server_name') or '').strip()
         pid = task.get('pid')
@@ -625,6 +671,17 @@ def reconcile_running_tasks():
             logger.info(f"[Health] deploy task_id={task['id']} pid={pid} ended -> done")
         elif alive is None:
             logger.info(f"[Health] deploy task_id={task['id']} pid={pid} check failed, keep running")
+
+        # 自动从日志提取端口号（如果尚未记录）
+        if alive is not False and not task.get('port'):
+            log_path = task.get('log_path')
+            if log_path:
+                ok, content = _read_remote_log_with_limit(server, log_path, lines=100)
+                if ok:
+                    port = extract_port_from_log(content)
+                    if port:
+                        db.update_deploy_task(task['id'], port=port)
+                        logger.info(f"[AutoExtract] deploy task_id={task['id']} port={port}")
 
     for task in db.get_running_test_tasks():
         server_name = (task.get('server_name') or '').strip()
