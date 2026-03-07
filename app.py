@@ -2155,6 +2155,48 @@ def delete_test_task_api(task_id):
     return jsonify({'success': True})
 
 
+@app.route('/api/cluster/test/<int:task_id>/result', methods=['POST'])
+@require_admin
+def record_test_result(task_id):
+    """记录测试任务的成功率和分数"""
+    data = request.get_json() or {}
+    success_rate = data.get('success_rate')
+    score = data.get('score')
+    
+    task = db.get_test_task(task_id)
+    if not task:
+        return jsonify({'success': False, 'error': '任务不存在'})
+    
+    # 验证输入
+    if success_rate is not None:
+        try:
+            success_rate = float(success_rate)
+            if success_rate < 0 or success_rate > 100:
+                return jsonify({'success': False, 'error': '成功率应在 0-100 之间'})
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': '成功率必须是数字'})
+    
+    if score is not None:
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': '分数必须是数字'})
+    
+    update_data = {}
+    if success_rate is not None:
+        update_data['success_rate'] = success_rate
+    if score is not None:
+        update_data['score'] = score
+    
+    if not update_data:
+        return jsonify({'success': False, 'error': '请提供成功率或分数'})
+    
+    ok = db.update_test_task(task_id, **update_data)
+    if not ok:
+        return jsonify({'success': False, 'error': '更新结果失败'})
+    return jsonify({'success': True})
+
+
 # ========== 模型权重 API ==========
 @app.route('/api/cluster/weights')
 @require_admin

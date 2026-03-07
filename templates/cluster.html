@@ -297,6 +297,14 @@
                 <i class="fas fa-brain"></i> 训练任务
                 <button type="button" class="section-toggle" onclick="toggleSection('train')">折叠/展开</button>
                 <button type="button" class="section-toggle" onclick="fillLastTrainForm()">填入上次</button>
+                <select id="train-status-filter" onchange="loadTraining()" style="margin-left:10px;padding:2px 8px;font-size:0.8rem;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#e6edf3;">
+                    <option value="">全部状态</option>
+                    <option value="pending">pending</option>
+                    <option value="running">running</option>
+                    <option value="done">done</option>
+                    <option value="failed">failed</option>
+                    <option value="killed">killed</option>
+                </select>
             </h2>
             <div id="train-section-body">
             <div class="form-row">
@@ -358,6 +366,14 @@
                 <i class="fas fa-rocket"></i> 部署任务
                 <button type="button" class="section-toggle" onclick="toggleSection('deploy')">折叠/展开</button>
                 <button type="button" class="section-toggle" onclick="fillLastDeployForm()">填入上次</button>
+                <select id="deploy-status-filter" onchange="loadDeploy()" style="margin-left:10px;padding:2px 8px;font-size:0.8rem;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#e6edf3;">
+                    <option value="">全部状态</option>
+                    <option value="pending">pending</option>
+                    <option value="running">running</option>
+                    <option value="done">done</option>
+                    <option value="failed">failed</option>
+                    <option value="killed">killed</option>
+                </select>
             </h2>
             <div id="deploy-section-body">
             <div class="form-row">
@@ -421,6 +437,19 @@
                 <i class="fas fa-vial"></i> 测试任务
                 <button type="button" class="section-toggle" onclick="toggleSection('test')">折叠/展开</button>
                 <button type="button" class="section-toggle" onclick="fillLastTestForm()">填入上次</button>
+                <select id="test-status-filter" onchange="loadTest()" style="margin-left:10px;padding:2px 8px;font-size:0.8rem;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#e6edf3;">
+                    <option value="">全部状态</option>
+                    <option value="pending">pending</option>
+                    <option value="running">running</option>
+                    <option value="done">done</option>
+                    <option value="failed">failed</option>
+                    <option value="killed">killed</option>
+                </select>
+                <select id="test-type-filter" onchange="loadTest()" style="margin-left:6px;padding:2px 8px;font-size:0.8rem;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#e6edf3;">
+                    <option value="">全部类型</option>
+                    <option value="mock">mock</option>
+                    <option value="real">real</option>
+                </select>
             </h2>
             <div id="test-section-body">
             <div class="form-row">
@@ -481,7 +510,7 @@
             <div class="table-wrap" style="margin-top:16px;">
                 <table>
                     <thead>
-                        <tr><th>ID</th><th>任务名</th><th>类型</th><th>关联部署ID</th><th>服务器</th><th>端口</th><th>状态</th><th>操作</th></tr>
+                        <tr><th>ID</th><th>任务名</th><th>类型</th><th>关联部署ID</th><th>服务器</th><th>端口</th><th>成功率</th><th>分数</th><th>状态</th><th>操作</th></tr>
                     </thead>
                     <tbody id="test-list"></tbody>
                 </table>
@@ -1218,10 +1247,15 @@
             const tbody = document.getElementById('train-list');
             if (!d.success) { tbody.innerHTML = '<tr><td colspan="8">加载失败</td></tr>'; return; }
             const statusClass = { pending: 'badge-pending', running: 'badge-running', done: 'badge-done', failed: 'badge-failed', killed: 'badge-killed' };
-            const tasks = d.tasks || [];
+            let tasks = d.tasks || [];
+            // 状态筛选
+            const statusFilter = document.getElementById('train-status-filter');
+            if (statusFilter && statusFilter.value) {
+                tasks = tasks.filter(t => t.status === statusFilter.value);
+            }
             // 缓存任务数据，用于恢复功能
             trainTaskCache.clear();
-            tasks.forEach(t => trainTaskCache.set(t.id, t));
+            d.tasks.forEach(t => trainTaskCache.set(t.id, t));
             const shown = sectionCollapsed.train ? tasks.slice(0, 10) : tasks;
             let rows = shown.map(t => `
                 <tr>
@@ -1256,8 +1290,13 @@
             const tbody = document.getElementById('deploy-list');
             if (!d.success) { tbody.innerHTML = '<tr><td colspan="9">加载失败</td></tr>'; return; }
             const statusClass = { pending: 'badge-pending', running: 'badge-running', done: 'badge-done', failed: 'badge-failed', killed: 'badge-killed' };
-            const tasks = d.tasks || [];
-            deployTaskCache = tasks;
+            let tasks = d.tasks || [];
+            // 状态筛选
+            const statusFilter = document.getElementById('deploy-status-filter');
+            if (statusFilter && statusFilter.value) {
+                tasks = tasks.filter(t => t.status === statusFilter.value);
+            }
+            deployTaskCache = d.tasks || [];
             updateTestDeployChoices(tasks);
             // 缓存部署任务数据用于恢复
             deployTaskCacheForRestore.clear();
@@ -1464,12 +1503,22 @@
         async function loadTest() {
             const d = await api('/api/cluster/test/list');
             const tbody = document.getElementById('test-list');
-            if (!d.success) { tbody.innerHTML = '<tr><td colspan="8">加载失败</td></tr>'; return; }
+            if (!d.success) { tbody.innerHTML = '<tr><td colspan="10">加载失败</td></tr>'; return; }
             const statusClass = { pending: 'badge-pending', running: 'badge-running', done: 'badge-done', failed: 'badge-failed', killed: 'badge-killed' };
-            const tasks = d.tasks || [];
+            let tasks = d.tasks || [];
+            // 状态筛选
+            const statusFilter = document.getElementById('test-status-filter');
+            if (statusFilter && statusFilter.value) {
+                tasks = tasks.filter(t => t.status === statusFilter.value);
+            }
+            // 类型筛选
+            const typeFilter = document.getElementById('test-type-filter');
+            if (typeFilter && typeFilter.value) {
+                tasks = tasks.filter(t => t.task_type === typeFilter.value);
+            }
             // 缓存测试任务数据用于恢复
             testTaskCache.clear();
-            tasks.forEach(t => testTaskCache.set(t.id, t));
+            d.tasks.forEach(t => testTaskCache.set(t.id, t));
             const shown = sectionCollapsed.test ? tasks.slice(0, 10) : tasks;
             let rows = shown.map(t => `
                 <tr>
@@ -1479,21 +1528,69 @@
                     <td>${t.deploy_task_id || '-'}</td>
                     <td>${t.server_name || '-'}</td>
                     <td>${t.port || '-'}</td>
+                    <td>${t.success_rate !== null && t.success_rate !== undefined ? t.success_rate + '%' : '-'}</td>
+                    <td>${t.score !== null && t.score !== undefined ? t.score : '-'}</td>
                     <td><span class="badge ${statusClass[t.status] || 'badge-pending'}">${t.status}</span></td>
                     <td>
                         ${t.log_path ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="viewTestLog(${t.id})">日志</button>` : ''}
                         ${t.status === 'running' ? `<button class="btn btn-danger" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="killTest(${t.id})">停止</button>` : ''}
                         ${t.status !== 'running' ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="deleteTest(${t.id})">删除</button>` : ''}
+                        <button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="recordTestResult(${t.id}, ${t.success_rate !== null && t.success_rate !== undefined ? t.success_rate : 'null'}, ${t.score !== null && t.score !== undefined ? t.score : 'null'})">${t.success_rate !== null || t.score !== null ? '修改结果' : '记录结果'}</button>
                         <button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="restoreTestTask(${t.id})">恢复</button>
                     </td>
                 </tr>
             `).join('');
             if (!rows) {
-                rows = '<tr><td colspan="8">暂无测试任务</td></tr>';
+                rows = '<tr><td colspan="10">暂无测试任务</td></tr>';
             } else if (sectionCollapsed.test && tasks.length > 10) {
-                rows += `<tr><td colspan="8" style="text-align:center;color:#8b949e;font-size:0.8rem;">共 ${tasks.length} 条，仅显示前 10 条，点击“折叠/展开”查看全部</td></tr>`;
+                rows += `<tr><td colspan="10" style="text-align:center;color:#8b949e;font-size:0.8rem;">共 ${tasks.length} 条，仅显示前 10 条，点击"折叠/展开"查看全部</td></tr>`;
             }
             tbody.innerHTML = rows;
+        }
+
+        async function recordTestResult(id, currentSuccessRate, currentScore) {
+            const successRateDefault = currentSuccessRate !== null && currentSuccessRate !== undefined ? currentSuccessRate.toString() : '';
+            const scoreDefault = currentScore !== null && currentScore !== undefined ? currentScore.toString() : '';
+            
+            const successRate = prompt('请输入成功率（0-100）：', successRateDefault);
+            if (successRate === null) return;
+            
+            const score = prompt('请输入分数：', scoreDefault);
+            if (score === null) return;
+            
+            const payload = {};
+            if (successRate.trim()) {
+                const sr = parseFloat(successRate.trim());
+                if (isNaN(sr) || sr < 0 || sr > 100) {
+                    showMsg('err', '成功率应在 0-100 之间');
+                    return;
+                }
+                payload.success_rate = sr;
+            }
+            if (score.trim()) {
+                const sc = parseFloat(score.trim());
+                if (isNaN(sc)) {
+                    showMsg('err', '分数必须是数字');
+                    return;
+                }
+                payload.score = sc;
+            }
+            
+            if (Object.keys(payload).length === 0) {
+                showMsg('err', '请至少填写成功率或分数');
+                return;
+            }
+            
+            const d = await api('/api/cluster/test/' + id + '/result', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (d.success) { 
+                showMsg('ok', currentSuccessRate !== null || currentScore !== null ? '结果已修改' : '结果已记录'); 
+                loadTest(); 
+            }
+            else showMsg('err', d.error);
         }
 
         async function submitTest() {

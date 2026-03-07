@@ -189,6 +189,10 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE test_tasks ADD COLUMN log_path TEXT DEFAULT ''")
             if 'action_nums' not in test_cols:
                 cursor.execute("ALTER TABLE test_tasks ADD COLUMN action_nums INTEGER")
+            if 'success_rate' not in test_cols:
+                cursor.execute("ALTER TABLE test_tasks ADD COLUMN success_rate REAL")
+            if 'score' not in test_cols:
+                cursor.execute("ALTER TABLE test_tasks ADD COLUMN score REAL")
 
             # 部署任务表
             cursor.execute('''
@@ -698,7 +702,7 @@ class DatabaseManager:
     
     def update_test_task(self, task_id, **kwargs):
         try:
-            allowed = {'server_name', 'port', 'gpu_ids', 'status', 'pid', 'started_at', 'finished_at', 'result', 'log_path'}
+            allowed = {'server_name', 'port', 'gpu_ids', 'status', 'pid', 'started_at', 'finished_at', 'result', 'log_path', 'success_rate', 'score'}
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 updates = []
@@ -769,19 +773,22 @@ class DatabaseManager:
             return []
     
     def _row_to_test_task(self, row):
+        # 注意：数据库中仍有废弃的 weight_path(6) 和 training_task_id(9) 列
         return {
             'id': row[0], 'name': row[1], 'task_type': row[2], 'server_name': row[3], 'port': row[4],
-            'gpu_ids': row[5], 'script_path': row[6], 'script_args': row[7],
-            'status': row[8], 'pid': row[9],
-            'created_at': row[10], 'started_at': row[11], 'finished_at': row[12], 'result': row[13],
-            'test_code_path': row[14] if len(row) > 14 else '',
-            'mock_url': row[15] if len(row) > 15 else '',
-            'mock_task_name': row[16] if len(row) > 16 else '',
-            'user_token': row[17] if len(row) > 17 else '',
-            'run_id': row[18] if len(row) > 18 else '',
-            'deploy_task_id': row[19] if len(row) > 19 else None,
-            'log_path': row[20] if len(row) > 20 else '',
-            'action_nums': row[21] if len(row) > 21 else None,
+            'gpu_ids': row[5], 'script_path': row[7], 'script_args': row[8],
+            'status': row[10], 'pid': row[11],
+            'created_at': row[12], 'started_at': row[13], 'finished_at': row[14], 'result': row[15],
+            'test_code_path': row[16] if len(row) > 16 else '',
+            'mock_url': row[17] if len(row) > 17 else '',
+            'mock_task_name': row[18] if len(row) > 18 else '',
+            'user_token': row[19] if len(row) > 19 else '',
+            'run_id': row[20] if len(row) > 20 else '',
+            'deploy_task_id': row[21] if len(row) > 21 else None,
+            'log_path': row[22] if len(row) > 22 else '',
+            'action_nums': row[23] if len(row) > 23 else None,
+            'success_rate': row[24] if len(row) > 24 else None,
+            'score': row[25] if len(row) > 25 else None,
         }
 
     # ========== 部署任务 ==========
