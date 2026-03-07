@@ -777,6 +777,7 @@ def run_test_on_server(task, server, gpu_ids, port):
     env = f'CUDA_VISIBLE_DEVICES={gpu_str}' if gpu_str else ''
     log_path = f"{str(code_path).rstrip('/')}/outputs/logs/test_{task['id']}_{int(time.time())}.log"
     runner = 'bash' if script.lower().endswith('.sh') else 'python'
+
     # 先记录日志路径，保证即使启动失败也能在列表里查看日志
     db.update_test_task(
         task['id'],
@@ -1864,10 +1865,24 @@ def submit_deploy_task():
     weight_path = data.get('weight_path', '').strip()
     priority = int(data.get('priority', 5))
     port = data.get('port')
+    training_task_id = data.get('training_task_id')
     try:
         port = int(port) if port not in (None, '') else None
     except (TypeError, ValueError):
         return jsonify({'success': False, 'error': '端口必须为数字'})
+    # 处理关联的训练任务ID
+    if training_task_id:
+        try:
+            training_task_id = int(training_task_id)
+            # 获取训练任务信息，自动填充权重路径
+            train_task = db.get_training_task(training_task_id)
+            if train_task:
+                if train_task.get('weight_path') and not weight_path:
+                    weight_path = train_task['weight_path']
+            else:
+                return jsonify({'success': False, 'error': f'训练任务 {training_task_id} 不存在'})
+        except (TypeError, ValueError):
+            training_task_id = None
     allowed_servers = data.get('allowed_servers')
     if not name or not script_path:
         return jsonify({'success': False, 'error': '任务名和脚本路径必填'})
@@ -1877,7 +1892,8 @@ def submit_deploy_task():
         weight_path=weight_path,
         priority=priority,
         allowed_servers=allowed_servers,
-        port=port
+        port=port,
+        training_task_id=training_task_id
     )
     if not ok:
         return jsonify({'success': False, 'error': str(result)})
@@ -2001,8 +2017,6 @@ def submit_test_task():
             deploy_task_id = int(deploy_task_id_raw)
         except (TypeError, ValueError):
             return jsonify({'success': False, 'error': '部署任务ID格式错误'})
-    training_task_id = data.get('training_task_id')
-
     # 选择了部署任务ID时，自动回填服务器、task_name、url
     if deploy_task_id is not None:
         deploy_task = db.get_deploy_task(deploy_task_id)
@@ -2046,7 +2060,6 @@ def submit_test_task():
         server_name=server_name,
         script_path=script_path,
         script_args=script_args,
-        training_task_id=training_task_id,
         test_code_path=test_code_path,
         mock_url=mock_url,
         mock_task_name=mock_task_name,

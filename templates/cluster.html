@@ -374,6 +374,12 @@
                     <label>端口(可选)</label>
                     <input type="number" id="deploy-port" value="" min="1" max="65535" placeholder="如 18080">
                 </div>
+                <div class="form-group">
+                    <label>关联训练任务ID(可选)</label>
+                    <select id="deploy-train-id" onchange="onDeployTrainChange()">
+                        <option value="">不关联</option>
+                    </select>
+                </div>
                 <div class="form-group" style="display:flex;align-items:flex-end;">
                     <button class="btn btn-primary" onclick="submitDeploy()">提交部署</button>
                 </div>
@@ -531,6 +537,8 @@
         let trainTaskCache = new Map();
         let deployTaskCacheForRestore = new Map();
         let testTaskCache = new Map();
+        // 训练任务缓存，用于部署任务关联训练任务
+        let trainTaskCacheForDeploy = [];
 
         function showMsg(type, text) {
             var msg = text ? String(text) : (type === 'ok' ? '成功' : '错误');
@@ -714,10 +722,10 @@
                 document.getElementById('test-user-token').value = t.user_token || '';
                 document.getElementById('test-run-id').value = t.run_id || '';
                 document.getElementById('test-action-nums').value = t.action_nums || '';
-                
+
                 // 根据类型显示/隐藏字段
                 onTestTypeChange();
-                
+
                 // 如果有关联部署任务，触发自动填充
                 if (t.deploy_task_id) {
                     onTestDeployChange();
@@ -755,6 +763,7 @@
                     weight_path: payload.weight_path || '',
                     priority: payload.priority || 5,
                     port: payload.port || '',
+                    training_task_id: payload.training_task_id || '',
                     allowed_servers: allowedServers || []
                 };
                 localStorage.setItem(DEPLOY_FORM_KEY, JSON.stringify(data));
@@ -771,10 +780,15 @@
                 document.getElementById('deploy-weight').value = d.weight_path || '';
                 document.getElementById('deploy-priority').value = d.priority || 5;
                 document.getElementById('deploy-port').value = d.port || '';
+                document.getElementById('deploy-train-id').value = d.training_task_id || '';
                 if (Array.isArray(d.allowed_servers) && d.allowed_servers.length > 0) {
                     document.querySelectorAll('.deploy-server-cb').forEach(cb => {
                         cb.checked = d.allowed_servers.includes(cb.value);
                     });
+                }
+                // 如果有关联训练任务，触发自动填充权重
+                if (d.training_task_id) {
+                    onDeployTrainChange();
                 }
                 showMsg('ok', '已填入上次部署参数');
             } catch (e) {
@@ -797,6 +811,7 @@
                 document.getElementById('deploy-weight').value = t.weight_path || '';
                 document.getElementById('deploy-priority').value = t.priority || 5;
                 document.getElementById('deploy-port').value = t.port || '';
+                document.getElementById('deploy-train-id').value = t.training_task_id || '';
                 
                 // 处理可选服务器
                 const allowedServers = t.allowed_servers || [];
@@ -804,6 +819,11 @@
                     document.querySelectorAll('.deploy-server-cb').forEach(cb => {
                         cb.checked = allowedServers.includes(cb.value);
                     });
+                }
+                
+                // 如果有关联训练任务，触发自动填充
+                if (t.training_task_id) {
+                    onDeployTrainChange();
                 }
                 
                 // 展开部署任务面板（如果折叠了）
@@ -1046,6 +1066,55 @@
             if (task.server_name) document.getElementById('test-server').value = task.server_name;
             if (task.name) document.getElementById('test-mock-task-name').value = task.name;
             if (task.port) document.getElementById('test-mock-url').value = `http://127.0.0.1:${task.port}`;
+            // 如果测试任务名为空，自动使用部署任务名
+            const nameInput = document.getElementById('test-name');
+            if (task.name && (!nameInput.value || nameInput.value.trim() === '')) {
+                nameInput.value = task.name;
+            }
+        }
+
+        // 更新部署任务页面的训练任务下拉框
+        function updateDeployTrainChoices(tasks) {
+            const el = document.getElementById('deploy-train-id');
+            if (!el) return;
+            const current = el.value;
+            let lastId = '';
+            try {
+                const raw = localStorage.getItem(DEPLOY_FORM_KEY);
+                if (raw) {
+                    const d = JSON.parse(raw);
+                    lastId = d.training_task_id ? String(d.training_task_id) : '';
+                }
+            } catch (e) {}
+            const selected = current || lastId;
+            // 缓存训练任务数据
+            trainTaskCacheForDeploy = tasks || [];
+            const options = (tasks || []).map(t => {
+                const id = String(t.id);
+                const selectedAttr = selected === id ? 'selected' : '';
+                const label = `${t.id} - ${t.name || ''}`.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                return `<option value="${id}" ${selectedAttr}>${label}</option>`;
+            }).join('');
+            el.innerHTML = '<option value="">不关联</option>' + options;
+        }
+
+        // 部署任务选择训练任务时的自动填充
+        function onDeployTrainChange() {
+            const el = document.getElementById('deploy-train-id');
+            const id = (el && el.value ? el.value : '').trim();
+            if (!id) return;
+            const task = trainTaskCacheForDeploy.find(t => String(t.id) === id);
+            if (!task) return;
+            // 如果权重路径为空，自动填充训练任务的权重
+            const weightInput = document.getElementById('deploy-weight');
+            if (task.weight_path && (!weightInput.value || weightInput.value.trim() === '')) {
+                weightInput.value = task.weight_path;
+            }
+            // 如果部署任务名为空，自动使用训练任务名
+            const nameInput = document.getElementById('deploy-name');
+            if (task.name && (!nameInput.value || nameInput.value.trim() === '')) {
+                nameInput.value = task.name;
+            }
         }
 
         function prettyPathName(path) {
@@ -1096,6 +1165,8 @@
                 rows += `<tr><td colspan="8" style="text-align:center;color:#8b949e;font-size:0.8rem;">共 ${tasks.length} 条，仅显示前 10 条，点击“折叠/展开”查看全部</td></tr>`;
             }
             tbody.innerHTML = rows;
+            // 更新部署任务页面的训练任务下拉框
+            updateDeployTrainChoices(tasks);
         }
 
         async function loadDeploy() {
@@ -1144,6 +1215,7 @@
             const priority = parseInt(document.getElementById('deploy-priority').value || '5', 10);
             const portRaw = document.getElementById('deploy-port').value.trim();
             const port = portRaw ? parseInt(portRaw, 10) : null;
+            const trainId = document.getElementById('deploy-train-id').value.trim();
             const allowedServers = getDeploySelectedServers();
             if (!name || !script) { showMsg('err', '任务名和脚本路径必填'); return; }
             if (portRaw && (isNaN(port) || port < 1 || port > 65535)) { showMsg('err', '端口范围应为 1-65535'); return; }
@@ -1152,7 +1224,8 @@
                 script_path: script,
                 weight_path: weight,
                 priority: isNaN(priority) ? 5 : priority,
-                port: port
+                port: port,
+                training_task_id: trainId || null
             };
             if (allowedServers.length > 0) payload.allowed_servers = allowedServers;
             saveLastDeployForm(payload, allowedServers);

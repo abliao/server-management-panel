@@ -140,10 +140,8 @@ class DatabaseManager:
                     server_name TEXT,
                     port INTEGER,
                     gpu_ids TEXT,
-                    weight_path TEXT,
                     script_path TEXT,
                     script_args TEXT,
-                    training_task_id INTEGER,
                     status TEXT DEFAULT 'pending',
                     pid INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -155,13 +153,23 @@ class DatabaseManager:
                     mock_task_name TEXT,
                     user_token TEXT,
                     run_id TEXT,
-                    deploy_task_id INTEGER,
-                    FOREIGN KEY (training_task_id) REFERENCES training_tasks(id)
+                    deploy_task_id INTEGER
                 )
             ''')
             # 迁移：为测试任务表添加新参数列
             cursor.execute("PRAGMA table_info(test_tasks)")
             test_cols = [r[1] for r in cursor.fetchall()]
+            # 删除已废弃的 weight_path 和 training_task_id 字段（测试任务只关联部署任务）
+            if 'weight_path' in test_cols:
+                try:
+                    cursor.execute("ALTER TABLE test_tasks DROP COLUMN weight_path")
+                except Exception:
+                    pass
+            if 'training_task_id' in test_cols:
+                try:
+                    cursor.execute("ALTER TABLE test_tasks DROP COLUMN training_task_id")
+                except Exception:
+                    pass
             if 'test_code_path' not in test_cols:
                 cursor.execute("ALTER TABLE test_tasks ADD COLUMN test_code_path TEXT DEFAULT ''")
             if 'mock_url' not in test_cols:
@@ -205,6 +213,10 @@ class DatabaseManager:
             deploy_cols = [r[1] for r in cursor.fetchall()]
             if 'port' not in deploy_cols:
                 cursor.execute("ALTER TABLE deploy_tasks ADD COLUMN port INTEGER")
+            
+            # 迁移：为部署任务表添加 training_task_id
+            if 'training_task_id' not in deploy_cols:
+                cursor.execute("ALTER TABLE deploy_tasks ADD COLUMN training_task_id INTEGER REFERENCES training_tasks(id)")
             
             # 模型权重记录表
             cursor.execute('''
@@ -654,7 +666,7 @@ class DatabaseManager:
         }
     
     # ========== 测试任务 ==========
-    def add_test_task(self, name, task_type, server_name='', script_path='', script_args='', training_task_id=None,
+    def add_test_task(self, name, task_type, server_name='', script_path='', script_args='',
                       test_code_path='', mock_url='', mock_task_name='', user_token='', run_id='',
                       action_nums=None, deploy_task_id=None):
         try:
@@ -662,12 +674,14 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO test_tasks (
-                        name, task_type, server_name, script_path, script_args, training_task_id, status,
-                        test_code_path, mock_url, mock_task_name, user_token, run_id, action_nums, deploy_task_id
+                        name, task_type, server_name, gpu_ids, script_path, script_args,
+                        status, test_code_path, mock_url, mock_task_name,
+                        user_token, run_id, action_nums, deploy_task_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
-                ''', (name, task_type, server_name, script_path, script_args, training_task_id,
-                      test_code_path, mock_url, mock_task_name, user_token, run_id, action_nums, deploy_task_id))
+                    VALUES (?, ?, ?, '', ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+                ''', (name, task_type, server_name, script_path, script_args,
+                      test_code_path, mock_url, mock_task_name,
+                      user_token, run_id, action_nums, deploy_task_id))
                 conn.commit()
                 return True, cursor.lastrowid
         except Exception as e:
@@ -748,29 +762,29 @@ class DatabaseManager:
     def _row_to_test_task(self, row):
         return {
             'id': row[0], 'name': row[1], 'task_type': row[2], 'server_name': row[3], 'port': row[4],
-            'gpu_ids': row[5], 'weight_path': row[6], 'script_path': row[7], 'script_args': row[8],
-            'training_task_id': row[9], 'status': row[10], 'pid': row[11],
-            'created_at': row[12], 'started_at': row[13], 'finished_at': row[14], 'result': row[15],
-            'test_code_path': row[16] if len(row) > 16 else '',
-            'mock_url': row[17] if len(row) > 17 else '',
-            'mock_task_name': row[18] if len(row) > 18 else '',
-            'user_token': row[19] if len(row) > 19 else '',
-            'run_id': row[20] if len(row) > 20 else '',
-            'deploy_task_id': row[21] if len(row) > 21 else None,
-            'log_path': row[22] if len(row) > 22 else '',
-            'action_nums': row[23] if len(row) > 23 else None,
+            'gpu_ids': row[5], 'script_path': row[6], 'script_args': row[7],
+            'status': row[8], 'pid': row[9],
+            'created_at': row[10], 'started_at': row[11], 'finished_at': row[12], 'result': row[13],
+            'test_code_path': row[14] if len(row) > 14 else '',
+            'mock_url': row[15] if len(row) > 15 else '',
+            'mock_task_name': row[16] if len(row) > 16 else '',
+            'user_token': row[17] if len(row) > 17 else '',
+            'run_id': row[18] if len(row) > 18 else '',
+            'deploy_task_id': row[19] if len(row) > 19 else None,
+            'log_path': row[20] if len(row) > 20 else '',
+            'action_nums': row[21] if len(row) > 21 else None,
         }
 
     # ========== 部署任务 ==========
-    def add_deploy_task(self, name, script_path, weight_path='', priority=5, allowed_servers=None, port=None):
+    def add_deploy_task(self, name, script_path, weight_path='', priority=5, allowed_servers=None, port=None, training_task_id=None):
         try:
             allowed_str = json.dumps(allowed_servers or []) if allowed_servers is not None else '[]'
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO deploy_tasks (name, script_path, weight_path, priority, allowed_servers, status, port)
-                    VALUES (?, ?, ?, ?, ?, 'pending', ?)
-                ''', (name, script_path, weight_path, int(priority), allowed_str, port))
+                    INSERT INTO deploy_tasks (name, script_path, weight_path, priority, allowed_servers, status, port, training_task_id)
+                    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+                ''', (name, script_path, weight_path, int(priority), allowed_str, port, training_task_id))
                 conn.commit()
                 return True, cursor.lastrowid
         except Exception as e:
@@ -778,7 +792,7 @@ class DatabaseManager:
 
     def update_deploy_task(self, task_id, **kwargs):
         try:
-            allowed = {'server_name', 'gpu_ids', 'status', 'log_path', 'pid', 'started_at', 'finished_at', 'result', 'weight_path', 'script_path', 'priority', 'port'}
+            allowed = {'server_name', 'gpu_ids', 'status', 'log_path', 'pid', 'started_at', 'finished_at', 'result', 'weight_path', 'script_path', 'priority', 'port', 'training_task_id'}
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 updates = []
@@ -859,7 +873,8 @@ class DatabaseManager:
             'server_name': row[4], 'gpu_ids': row[5], 'priority': row[6], 'allowed_servers': allowed,
             'status': row[8], 'log_path': row[9], 'pid': row[10], 'created_at': row[11],
             'started_at': row[12], 'finished_at': row[13], 'result': row[14],
-            'port': row[15] if len(row) > 15 else None
+            'port': row[15] if len(row) > 15 else None,
+            'training_task_id': row[16] if len(row) > 16 else None
         }
     
     # ========== 模型权重 ==========
