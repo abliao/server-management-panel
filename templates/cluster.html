@@ -527,6 +527,10 @@
         const TEST_FORM_KEY = 'cluster_last_test_form';
         let deployTaskCache = [];
         let currentLogMeta = null;
+        // 任务缓存，用于恢复功能
+        let trainTaskCache = new Map();
+        let deployTaskCacheForRestore = new Map();
+        let testTaskCache = new Map();
 
         function showMsg(type, text) {
             var msg = text ? String(text) : (type === 'ok' ? '成功' : '错误');
@@ -603,6 +607,46 @@
             }
         }
 
+        function restoreTrainingTask(id) {
+            try {
+                // 从缓存中获取任务数据
+                const t = trainTaskCache.get(id);
+                if (!t) {
+                    showMsg('err', '任务数据未找到，请刷新页面后重试');
+                    return;
+                }
+                
+                // 填充表单
+                document.getElementById('train-name').value = t.name || '';
+                document.getElementById('train-task-name').value = t.task_name || '';
+                document.getElementById('train-script').value = t.script_path || '';
+                document.getElementById('train-args').value = t.script_args || '';
+                document.getElementById('train-gpu-count').value = t.gpu_count || 1;
+                document.getElementById('train-priority').value = t.priority || 5;
+                
+                // 处理可选服务器
+                const allowedServers = t.allowed_servers || [];
+                if (Array.isArray(allowedServers) && allowedServers.length > 0) {
+                    document.querySelectorAll('.train-server-cb').forEach(cb => {
+                        cb.checked = allowedServers.includes(cb.value);
+                    });
+                }
+                
+                // 展开训练任务面板（如果折叠了）
+                const trainSection = document.getElementById('train-section-body');
+                if (trainSection && sectionCollapsed.train) {
+                    toggleSection('train');
+                }
+                
+                // 滚动到训练表单
+                document.getElementById('train-name').scrollIntoView({ behavior: 'smooth', block: 'center' });
+                
+                showMsg('ok', `已加载任务 ${id} 的参数，修改后可重新提交`);
+            } catch (e) {
+                showMsg('err', '恢复任务参数失败: ' + e.message);
+            }
+        }
+
         function saveLastTestForm(payload) {
             try {
                 const data = {
@@ -648,6 +692,52 @@
             }
         }
 
+        function restoreTestTask(id) {
+            try {
+                // 从缓存中获取任务数据
+                const t = testTaskCache.get(id);
+                if (!t) {
+                    showMsg('err', '测试任务数据未找到，请刷新页面后重试');
+                    return;
+                }
+                
+                // 填充表单
+                document.getElementById('test-name').value = t.name || '';
+                document.getElementById('test-type').value = t.task_type || 'mock';
+                document.getElementById('test-server').value = t.server_name || '';
+                document.getElementById('test-deploy-id').value = t.deploy_task_id || '';
+                document.getElementById('test-code-path').value = t.test_code_path || '';
+                document.getElementById('test-script').value = t.script_path || '';
+                document.getElementById('test-args').value = t.script_args || '';
+                document.getElementById('test-mock-url').value = t.mock_url || '';
+                document.getElementById('test-mock-task-name').value = t.mock_task_name || '';
+                document.getElementById('test-user-token').value = t.user_token || '';
+                document.getElementById('test-run-id').value = t.run_id || '';
+                document.getElementById('test-action-nums').value = t.action_nums || '';
+                
+                // 根据类型显示/隐藏字段
+                onTestTypeChange();
+                
+                // 如果有关联部署任务，触发自动填充
+                if (t.deploy_task_id) {
+                    onTestDeployChange();
+                }
+                
+                // 展开测试任务面板（如果折叠了）
+                const testSection = document.getElementById('test-section-body');
+                if (testSection && sectionCollapsed.test) {
+                    toggleSection('test');
+                }
+                
+                // 滚动到测试表单
+                document.getElementById('test-name').scrollIntoView({ behavior: 'smooth', block: 'center' });
+                
+                showMsg('ok', `已加载测试任务 ${id} 的参数，修改后可重新提交`);
+            } catch (e) {
+                showMsg('err', '恢复测试任务参数失败: ' + e.message);
+            }
+        }
+
         function onTestTypeChange() {
             const type = document.getElementById('test-type').value;
             const mockEls = document.querySelectorAll('.test-mock-field');
@@ -689,6 +779,45 @@
                 showMsg('ok', '已填入上次部署参数');
             } catch (e) {
                 showMsg('err', '读取上次部署参数失败');
+            }
+        }
+
+        function restoreDeployTask(id) {
+            try {
+                // 从缓存中获取任务数据
+                const t = deployTaskCacheForRestore.get(id);
+                if (!t) {
+                    showMsg('err', '部署任务数据未找到，请刷新页面后重试');
+                    return;
+                }
+                
+                // 填充表单
+                document.getElementById('deploy-name').value = t.name || '';
+                document.getElementById('deploy-script').value = t.script_path || '';
+                document.getElementById('deploy-weight').value = t.weight_path || '';
+                document.getElementById('deploy-priority').value = t.priority || 5;
+                document.getElementById('deploy-port').value = t.port || '';
+                
+                // 处理可选服务器
+                const allowedServers = t.allowed_servers || [];
+                if (Array.isArray(allowedServers) && allowedServers.length > 0) {
+                    document.querySelectorAll('.deploy-server-cb').forEach(cb => {
+                        cb.checked = allowedServers.includes(cb.value);
+                    });
+                }
+                
+                // 展开部署任务面板（如果折叠了）
+                const deploySection = document.getElementById('deploy-section-body');
+                if (deploySection && sectionCollapsed.deploy) {
+                    toggleSection('deploy');
+                }
+                
+                // 滚动到部署表单
+                document.getElementById('deploy-name').scrollIntoView({ behavior: 'smooth', block: 'center' });
+                
+                showMsg('ok', `已加载部署任务 ${id} 的参数，修改后可重新提交`);
+            } catch (e) {
+                showMsg('err', '恢复部署任务参数失败: ' + e.message);
             }
         }
 
@@ -782,20 +911,25 @@
                 el.innerHTML = '<span style="color:#6e7681;">暂无服务器</span>';
                 return;
             }
-            // 读取上次保存的服务器选择
-            let lastAllowed = [];
-            try {
-                const raw = localStorage.getItem(TRAIN_FORM_KEY);
-                if (raw) {
-                    const d = JSON.parse(raw);
-                    if (Array.isArray(d.allowed_servers)) lastAllowed = d.allowed_servers;
-                }
-            } catch (e) {}
+            // 先保存当前用户已勾选的服务器（避免刷新时丢失）
+            const currentChecked = Array.from(document.querySelectorAll('.train-server-cb:checked')).map(cb => cb.value);
+
+            // 如果有已勾选的，优先保留；否则读取上次保存的
+            let serversToCheck = currentChecked.length > 0 ? currentChecked : [];
+            if (serversToCheck.length === 0) {
+                try {
+                    const raw = localStorage.getItem(TRAIN_FORM_KEY);
+                    if (raw) {
+                        const d = JSON.parse(raw);
+                        if (Array.isArray(d.allowed_servers)) serversToCheck = d.allowed_servers;
+                    }
+                } catch (e) {}
+            }
 
             el.innerHTML = serverNames.map(name => {
                 const safeName = name.replace(/"/g, '&quot;');
                 const labelName = name.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                const checked = !lastAllowed.length || lastAllowed.includes(name);
+                const checked = serversToCheck.length === 0 || serversToCheck.includes(name);
                 return `<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:0.9rem;">
                     <input type="checkbox" class="train-server-cb" value="${safeName}" ${checked ? 'checked' : ''}>
                     ${labelName}
@@ -823,18 +957,25 @@
                 el.innerHTML = '<span style="color:#6e7681;">暂无服务器</span>';
                 return;
             }
-            let lastAllowed = [];
-            try {
-                const raw = localStorage.getItem(DEPLOY_FORM_KEY);
-                if (raw) {
-                    const d = JSON.parse(raw);
-                    if (Array.isArray(d.allowed_servers)) lastAllowed = d.allowed_servers;
-                }
-            } catch (e) {}
+            // 先保存当前用户已勾选的服务器（避免刷新时丢失）
+            const currentChecked = Array.from(document.querySelectorAll('.deploy-server-cb:checked')).map(cb => cb.value);
+
+            // 如果有已勾选的，优先保留；否则读取上次保存的
+            let serversToCheck = currentChecked.length > 0 ? currentChecked : [];
+            if (serversToCheck.length === 0) {
+                try {
+                    const raw = localStorage.getItem(DEPLOY_FORM_KEY);
+                    if (raw) {
+                        const d = JSON.parse(raw);
+                        if (Array.isArray(d.allowed_servers)) serversToCheck = d.allowed_servers;
+                    }
+                } catch (e) {}
+            }
+
             el.innerHTML = serverNames.map(name => {
                 const safeName = name.replace(/"/g, '&quot;');
                 const labelName = name.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                const checked = !lastAllowed.length || lastAllowed.includes(name);
+                const checked = serversToCheck.length === 0 || serversToCheck.includes(name);
                 return `<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:0.9rem;">
                     <input type="checkbox" class="deploy-server-cb" value="${safeName}" ${checked ? 'checked' : ''}>
                     ${labelName}
@@ -927,6 +1068,9 @@
             if (!d.success) { tbody.innerHTML = '<tr><td colspan="8">加载失败</td></tr>'; return; }
             const statusClass = { pending: 'badge-pending', running: 'badge-running', done: 'badge-done', failed: 'badge-failed', killed: 'badge-killed' };
             const tasks = d.tasks || [];
+            // 缓存任务数据，用于恢复功能
+            trainTaskCache.clear();
+            tasks.forEach(t => trainTaskCache.set(t.id, t));
             const shown = sectionCollapsed.train ? tasks.slice(0, 10) : tasks;
             let rows = shown.map(t => `
                 <tr>
@@ -940,8 +1084,9 @@
                     <td>
                         ${t.log_path ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="viewLog(${t.id})">日志</button>` : ''}
                         ${t.status === 'running' ? `<button class="btn btn-danger" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="killTrain(${t.id})">停止</button>` : ''}
-                        ${t.status !== 'running' ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="deleteTrain(${t.id})">删除</button>` : ''}
-                        ${(t.status === 'done' || t.status === 'running') ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="recordWeight(${t.id},'${(t.name||'').replace(/'/g,"\\'")}', '${encodeURIComponent(t.weight_path || '')}')">${t.weight_path ? '修改权重' : '记录权重'}</button>` : ''}
+                        ${t.status !== 'running' ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="deleteTrain(${t.id})">删除</button>` : ''}
+                        ${(t.status === 'done' || t.status === 'running') ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="recordWeight(${t.id},'${(t.name||'').replace(/'/g,"\\'")}', '${encodeURIComponent(t.weight_path || '')}')">${t.weight_path ? '修改权重' : '记录权重'}</button>` : ''}
+                        <button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="restoreTrainingTask(${t.id})">恢复</button>
                     </td>
                 </tr>
             `).join('');
@@ -961,6 +1106,9 @@
             const tasks = d.tasks || [];
             deployTaskCache = tasks;
             updateTestDeployChoices(tasks);
+            // 缓存部署任务数据用于恢复
+            deployTaskCacheForRestore.clear();
+            tasks.forEach(t => deployTaskCacheForRestore.set(t.id, t));
             const shown = sectionCollapsed.deploy ? tasks.slice(0, 10) : tasks;
             let rows = shown.map(t => `
                 <tr>
@@ -975,8 +1123,9 @@
                     <td>
                         ${t.log_path ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="viewDeployLog(${t.id})">日志</button>` : ''}
                         ${t.status === 'running' ? `<button class="btn btn-danger" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="killDeploy(${t.id})">停止</button>` : ''}
-                        ${t.status !== 'running' ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="deleteDeploy(${t.id})">删除</button>` : ''}
-                        <button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-left:4px;" onclick="recordDeployPort(${t.id}, '${t.port || ''}')">${t.port ? '修改端口' : '记录端口'}</button>
+                        ${t.status !== 'running' ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="deleteDeploy(${t.id})">删除</button>` : ''}
+                        <button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="recordDeployPort(${t.id}, '${t.port || ''}')">${t.port ? '修改端口' : '记录端口'}</button>
+                        <button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="restoreDeployTask(${t.id})">恢复</button>
                     </td>
                 </tr>
             `).join('');
@@ -1163,6 +1312,9 @@
             if (!d.success) { tbody.innerHTML = '<tr><td colspan="8">加载失败</td></tr>'; return; }
             const statusClass = { pending: 'badge-pending', running: 'badge-running', done: 'badge-done', failed: 'badge-failed', killed: 'badge-killed' };
             const tasks = d.tasks || [];
+            // 缓存测试任务数据用于恢复
+            testTaskCache.clear();
+            tasks.forEach(t => testTaskCache.set(t.id, t));
             const shown = sectionCollapsed.test ? tasks.slice(0, 10) : tasks;
             let rows = shown.map(t => `
                 <tr>
@@ -1175,8 +1327,9 @@
                     <td><span class="badge ${statusClass[t.status] || 'badge-pending'}">${t.status}</span></td>
                     <td>
                         ${t.log_path ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="viewTestLog(${t.id})">日志</button>` : ''}
-                        ${t.status === 'running' ? `<button class="btn btn-danger" style="padding:4px 8px;font-size:0.8rem;" onclick="killTest(${t.id})">停止</button>` : ''}
-                        ${t.status !== 'running' ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="deleteTest(${t.id})">删除</button>` : ''}
+                        ${t.status === 'running' ? `<button class="btn btn-danger" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="killTest(${t.id})">停止</button>` : ''}
+                        ${t.status !== 'running' ? `<button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="deleteTest(${t.id})">删除</button>` : ''}
+                        <button class="btn btn-secondary" style="padding:4px 8px;font-size:0.8rem;" onclick="restoreTestTask(${t.id})">恢复</button>
                     </td>
                 </tr>
             `).join('');
