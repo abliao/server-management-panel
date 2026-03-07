@@ -546,7 +546,7 @@ def extract_save_folder_from_output(output_text):
     return raw
 
 
-def _read_remote_log_with_limit(server, log_path, lines=None):
+def _read_remote_log_with_limit(server, log_path, lines=None, is_tail=True):
     """读取远程日志；lines 为正整数时仅返回最后 N 行。"""
     path = str(log_path or '').strip()
     if not path:
@@ -560,7 +560,7 @@ def _read_remote_log_with_limit(server, log_path, lines=None):
         except (TypeError, ValueError):
             n = None
     if n is not None and n > 0:
-        cmd = f'if [ -f {qpath} ]; then head -n {n} {qpath}; else echo "(日志文件不存在)"; fi'
+        cmd = f'if [ -f {qpath} ]; then {"tail" if is_tail else "head"} -n {n} {qpath}; else echo "(日志文件不存在)"; fi'
     else:
         cmd = f'if [ -f {qpath} ]; then cat {qpath}; else echo "(日志文件不存在)"; fi'
     return execute_ssh_command_silent(server, cmd)
@@ -644,7 +644,7 @@ def reconcile_running_tasks():
         if alive is not False and not (task.get('weight_path') or '').strip():
             log_path = task.get('log_path')
             if log_path:
-                ok, content = _read_remote_log_with_limit(server, log_path, lines=100)
+                ok, content = _read_remote_log_with_limit(server, log_path, lines=100, is_tail=False)
                 if ok:
                     weight_path = extract_weight_from_log(content)
                     if weight_path:
@@ -676,7 +676,7 @@ def reconcile_running_tasks():
         if alive is not False and not task.get('port'):
             log_path = task.get('log_path')
             if log_path:
-                ok, content = _read_remote_log_with_limit(server, log_path, lines=100)
+                ok, content = _read_remote_log_with_limit(server, log_path, lines=100, is_tail=False)
                 if ok:
                     port = extract_port_from_log(content)
                     if port:
