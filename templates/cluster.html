@@ -390,6 +390,10 @@
                     <input type="text" id="deploy-weight" placeholder="checkpoints/xxx.pt">
                 </div>
                 <div class="form-group">
+                    <label>模型 Step(可选)</label>
+                    <input type="text" id="deploy-step" placeholder="如 1000 或 step-1000">
+                </div>
+                <div class="form-group">
                     <label>优先级(1-10)</label>
                     <input type="number" id="deploy-priority" value="5" min="1" max="10">
                 </div>
@@ -795,12 +799,13 @@
             realEls.forEach(el => el.style.display = (type === 'real') ? '' : 'none');
         }
 
-        function saveLastDeployForm(payload, allowedServers) {
+        function saveLastDeployForm(payload, allowedServers, step) {
             try {
                 const data = {
                     name: payload.name || '',
                     script_path: payload.script_path || '',
                     weight_path: payload.weight_path || '',
+                    step: step ? String(step) : '',
                     priority: payload.priority || 5,
                     port: payload.port || '',
                     training_task_id: payload.training_task_id || '',
@@ -818,6 +823,7 @@
                 document.getElementById('deploy-name').value = d.name || '';
                 document.getElementById('deploy-script').value = d.script_path || '';
                 document.getElementById('deploy-weight').value = d.weight_path || '';
+                document.getElementById('deploy-step').value = d.step ? String(d.step) : '';
                 document.getElementById('deploy-priority').value = d.priority || 5;
                 document.getElementById('deploy-port').value = d.port || '';
                 document.getElementById('deploy-train-id').value = d.training_task_id || '';
@@ -844,15 +850,16 @@
                     showMsg('err', '部署任务数据未找到，请刷新页面后重试');
                     return;
                 }
-                
+
                 // 填充表单
                 document.getElementById('deploy-name').value = t.name || '';
                 document.getElementById('deploy-script').value = t.script_path || '';
                 document.getElementById('deploy-weight').value = t.weight_path || '';
+                document.getElementById('deploy-step').value = t.step ? String(t.step) : '';
                 document.getElementById('deploy-priority').value = t.priority || 5;
                 document.getElementById('deploy-port').value = t.port || '';
                 document.getElementById('deploy-train-id').value = t.training_task_id || '';
-                
+
                 // 处理可选服务器
                 const allowedServers = t.allowed_servers || [];
                 if (Array.isArray(allowedServers) && allowedServers.length > 0) {
@@ -860,21 +867,21 @@
                         cb.checked = allowedServers.includes(cb.value);
                     });
                 }
-                
+
                 // 如果有关联训练任务，触发自动填充
                 if (t.training_task_id) {
                     onDeployTrainChange();
                 }
-                
+
                 // 展开部署任务面板（如果折叠了）
                 const deploySection = document.getElementById('deploy-section-body');
                 if (deploySection && sectionCollapsed.deploy) {
                     toggleSection('deploy');
                 }
-                
+
                 // 滚动到部署表单
                 document.getElementById('deploy-name').scrollIntoView({ behavior: 'smooth', block: 'center' });
-                
+
                 showMsg('ok', `已加载部署任务 ${id} 的参数，修改后可重新提交`);
             } catch (e) {
                 showMsg('err', '恢复部署任务参数失败: ' + e.message);
@@ -1170,7 +1177,7 @@
             if (task.port) document.getElementById('test-mock-url').value = `http://127.0.0.1:${task.port}`;
             // 如果测试任务名为空，自动使用部署任务名
             const nameInput = document.getElementById('test-name');
-            if (task.name && (!nameInput.value || nameInput.value.trim() === '')) {
+            if (task.name) {
                 nameInput.value = task.name;
             }
         }
@@ -1210,12 +1217,12 @@
             if (!task) return;
             // 如果权重路径为空，自动填充训练任务的权重
             const weightInput = document.getElementById('deploy-weight');
-            if (task.weight_path && (!weightInput.value || weightInput.value.trim() === '')) {
+            if (task.weight_path) {
                 weightInput.value = task.weight_path;
             }
             // 如果部署任务名为空，自动使用训练任务名
             const nameInput = document.getElementById('deploy-name');
-            if (task.name && (!nameInput.value || nameInput.value.trim() === '')) {
+            if (task.name) {
                 nameInput.value = task.name;
             }
             // 自动选择与训练任务服务器同组的服务器
@@ -1333,6 +1340,7 @@
             const name = document.getElementById('deploy-name').value.trim();
             const script = document.getElementById('deploy-script').value.trim();
             const weight = document.getElementById('deploy-weight').value.trim();
+            const step = document.getElementById('deploy-step').value.trim();
             const priority = parseInt(document.getElementById('deploy-priority').value || '5', 10);
             const portRaw = document.getElementById('deploy-port').value.trim();
             const port = portRaw ? parseInt(portRaw, 10) : null;
@@ -1340,16 +1348,21 @@
             const allowedServers = getDeploySelectedServers();
             if (!name || !script) { showMsg('err', '任务名和脚本路径必填'); return; }
             if (portRaw && (isNaN(port) || port < 1 || port > 65535)) { showMsg('err', '端口范围应为 1-65535'); return; }
+            // 如果指定了 step，weight_path 为 deploy-weight/step
+            let finalWeightPath = weight;
+            if (weight && step) {
+                finalWeightPath = weight + '/' + step;
+            }
             const payload = {
                 name,
                 script_path: script,
-                weight_path: weight,
+                weight_path: finalWeightPath,
                 priority: isNaN(priority) ? 5 : priority,
                 port: port,
                 training_task_id: trainId || null
             };
             if (allowedServers.length > 0) payload.allowed_servers = allowedServers;
-            saveLastDeployForm(payload, allowedServers);
+            saveLastDeployForm(payload, allowedServers, step);
             const d = await api('/api/cluster/deploy/submit', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
