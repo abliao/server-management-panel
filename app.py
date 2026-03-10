@@ -58,6 +58,7 @@ CONFIG_TRAIN_UTIL_THRESHOLD = 'train_gpu_util_threshold'
 CONFIG_TEST_MEM_THRESHOLD = 'test_gpu_mem_threshold'
 CONFIG_TEST_UTIL_THRESHOLD = 'test_gpu_util_threshold'
 CONFIG_RESERVED_GPU = 'reserved_gpu_count'
+CONFIG_RESERVED_GPU_PER_SERVER = 'reserved_gpu_per_server'  # 各服务器独立的保留卡数配置（JSON格式）
 CONFIG_GPU_LOCK_TTL_TRAIN = 'gpu_lock_ttl_train_seconds'  # 训练GPU预占锁超时（秒）
 CONFIG_GPU_LOCK_TTL_DEPLOY = 'gpu_lock_ttl_deploy_seconds'  # 部署GPU预占锁超时（秒）
 CONFIG_SERVER_GROUPS = 'server_groups'  # 服务器分组配置
@@ -366,17 +367,26 @@ def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowe
         mem_th = int(db.get_config(CONFIG_TRAIN_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
         util_th = int(db.get_config(CONFIG_TRAIN_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
         lock_ttl = int(db.get_config(CONFIG_GPU_LOCK_TTL_TRAIN, 300))
-    reserved = int(db.get_config(CONFIG_RESERVED_GPU, 0))
+    # 读取保留卡数配置（全局默认值 + 各服务器独立配置）
+    default_reserved = int(db.get_config(CONFIG_RESERVED_GPU, 0))
+    reserved_per_server_str = db.get_config(CONFIG_RESERVED_GPU_PER_SERVER, '{}')
+    try:
+        reserved_per_server = json.loads(reserved_per_server_str) if reserved_per_server_str else {}
+    except json.JSONDecodeError:
+        reserved_per_server = {}
+
     servers = load_servers()
-    logger.info(f"[Scheduler] find_idle_server_and_gpus task_type={task_type} gpu_count={gpu_count} reserved={reserved} allowed={allowed_servers}")
+    logger.info(f"[Scheduler] find_idle_server_and_gpus task_type={task_type} gpu_count={gpu_count} default_reserved={default_reserved} allowed={allowed_servers}")
     if allowed_servers:
         allow_set = set(s.strip() for s in allowed_servers if s and str(s).strip())
         servers = [s for s in servers if s['name'] in allow_set]
     for srv in servers:
         st = server_status.get(srv['name'], {})
         gpu_text = st.get('gpu_status', '')
-        idle = find_idle_gpus(gpu_text, mem_threshold=mem_th, util_threshold=util_th, reserved_gpu_count=reserved)
-        
+        # 获取该服务器的保留卡数（优先使用独立配置，否则使用默认值）
+        srv_reserved = reserved_per_server.get(srv['name'], default_reserved)
+        idle = find_idle_gpus(gpu_text, mem_threshold=mem_th, util_threshold=util_th, reserved_gpu_count=srv_reserved)
+
         # 过滤掉被预占锁的GPU（锁文件中已包含独立的到期时间戳，无需传入TTL）
         available = []
         for gpu_id in idle:
@@ -385,8 +395,8 @@ def find_idle_server_and_gpus(gpu_count=1, reserved=0, task_type='train', allowe
                 logger.info(f"[Scheduler]   server={srv['name']} gpu={gpu_id} is locked, skip")
             else:
                 available.append(gpu_id)
-        
-        logger.info(f"[Scheduler]   server={srv['name']} idle_gpus={idle} available_gpus={available} locked_count={len(idle)-len(available)} (need {gpu_count})")
+
+        logger.info(f"[Scheduler]   server={srv['name']} reserved={srv_reserved} idle_gpus={idle} available_gpus={available} locked_count={len(idle)-len(available)} (need {gpu_count})")
         if len(available) >= gpu_count:
             chosen = available[:gpu_count]
             logger.info(f"[Scheduler]   -> choose server={srv['name']} gpus={chosen}")
@@ -1726,6 +1736,7 @@ def get_cluster_config():
             'test_gpu_mem_threshold': db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, '20'),
             'test_gpu_util_threshold': db.get_config(CONFIG_TEST_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, '15'),
             'reserved_gpu_count': db.get_config(CONFIG_RESERVED_GPU, '0'),
+            'reserved_gpu_per_server': db.get_config(CONFIG_RESERVED_GPU_PER_SERVER, ''),
             'gpu_lock_ttl_train_seconds': db.get_config(CONFIG_GPU_LOCK_TTL_TRAIN, '300'),
             'gpu_lock_ttl_deploy_seconds': db.get_config(CONFIG_GPU_LOCK_TTL_DEPLOY, '300'),
             'server_groups': db.get_config(CONFIG_SERVER_GROUPS, ''),
@@ -1739,10 +1750,11 @@ def set_cluster_config():
     data = request.get_json() or {}
     keys = [CONFIG_CODE_PATH, CONFIG_DATA_PATH, CONFIG_MEM_THRESHOLD, CONFIG_UTIL_THRESHOLD,
             CONFIG_TRAIN_MEM_THRESHOLD, CONFIG_TRAIN_UTIL_THRESHOLD, CONFIG_TEST_MEM_THRESHOLD, CONFIG_TEST_UTIL_THRESHOLD,
-            CONFIG_RESERVED_GPU, CONFIG_GPU_LOCK_TTL_TRAIN, CONFIG_GPU_LOCK_TTL_DEPLOY, CONFIG_SERVER_GROUPS]
+            CONFIG_RESERVED_GPU, CONFIG_GPU_LOCK_TTL_TRAIN, CONFIG_GPU_LOCK_TTL_DEPLOY, CONFIG_SERVER_GROUPS,
+            CONFIG_RESERVED_GPU_PER_SERVER]
     for k in keys:
         if k in data:
-            db.set_config(k, str(data[k]))
+            db.set_config(k, str(data[k]) if data[k] is not None else '')
     return jsonify({'success': True})
 
 
@@ -2277,6 +2289,14 @@ def get_idle_gpus():
     deploy_mem = int(db.get_config(CONFIG_TEST_MEM_THRESHOLD) or db.get_config(CONFIG_MEM_THRESHOLD, 20))
     deploy_util = int(db.get_config(CONFIG_TEST_UTIL_THRESHOLD) or db.get_config(CONFIG_UTIL_THRESHOLD, 15))
 
+    # 读取全局保留卡数和各服务器独立配置
+    default_reserved = int(db.get_config(CONFIG_RESERVED_GPU, 0))
+    reserved_per_server_str = db.get_config(CONFIG_RESERVED_GPU_PER_SERVER, '{}')
+    try:
+        reserved_per_server = json.loads(reserved_per_server_str) if reserved_per_server_str else {}
+    except json.JSONDecodeError:
+        reserved_per_server = {}
+
     # 读取服务器分组信息
     all_servers = db.get_all_servers()
     name_to_group = {s['name']: (s.get('server_group') or '') for s in all_servers}
@@ -2286,8 +2306,10 @@ def get_idle_gpus():
         gpu_text = st.get('gpu_status', '') or ''
         is_error = 'Connection Error' in gpu_text or gpu_text.strip().startswith('Error:') or 'Loading...' in gpu_text
         gpus = parse_gpustat_output(gpu_text)
-        train_idle = find_idle_gpus(gpu_text, train_mem, train_util)
-        deploy_idle = find_idle_gpus(gpu_text, deploy_mem, deploy_util)
+        # 获取该服务器的保留卡数（优先使用独立配置，否则使用默认值）
+        srv_reserved = reserved_per_server.get(srv_name, default_reserved)
+        train_idle = find_idle_gpus(gpu_text, train_mem, train_util, reserved_gpu_count=srv_reserved)
+        deploy_idle = find_idle_gpus(gpu_text, deploy_mem, deploy_util, reserved_gpu_count=srv_reserved)
         result.append({
             'server': srv_name,
             'idle_gpus': deploy_idle,
@@ -2298,7 +2320,8 @@ def get_idle_gpus():
             'gpus': gpus,
             'connection_error': is_error,
             'gpu_status_preview': gpu_text[:80].replace('\n', ' ') if is_error else '',
-            'server_group': name_to_group.get(srv_name, '')
+            'server_group': name_to_group.get(srv_name, ''),
+            'reserved_gpu_count': srv_reserved  # 返回该服务器的保留卡数配置
         })
     return jsonify({'success': True, 'servers': result})
 

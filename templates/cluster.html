@@ -261,8 +261,13 @@
                     <input type="number" id="cfg-test-util" value="15" min="0" max="100">
                 </div>
                 <div class="form-group">
-                    <label>每机保留卡数</label>
-                    <input type="number" id="cfg-reserved" value="0" min="0">
+                    <label>每机保留卡数(默认)</label>
+                    <input type="number" id="cfg-reserved" value="0" min="0" title="未单独配置的服务器将使用此默认值">
+                </div>
+                <div class="form-group" style="flex:0 0 100%; margin-top:8px;">
+                    <label>各服务器保留卡数配置(JSON格式)</label>
+                    <input type="text" id="cfg-reserved-per-server" placeholder='{"server1": 2, "server2": 1}' style="width:100%;font-family:'JetBrains Mono',monospace;">
+                    <span style="color:#8b949e;font-size:0.8rem;">为特定服务器配置不同的保留卡数，未配置的服务器使用默认值</span>
                 </div>
                 <div class="form-group" style="flex:0 0 100%; margin-top:12px;"><strong style="color:#7ee787;">GPU预占锁配置</strong>（防止多用户同时调度冲突）</div>
                 <div class="form-group">
@@ -907,14 +912,24 @@
             const d = await api('/api/cluster/config');
             if (d.success) {
                 const c = d.config;
-                document.getElementById('cfg-train-mem').value = c.train_gpu_mem_threshold || '20';
-                document.getElementById('cfg-train-util').value = c.train_gpu_util_threshold || '15';
-                document.getElementById('cfg-test-mem').value = c.test_gpu_mem_threshold || '20';
-                document.getElementById('cfg-test-util').value = c.test_gpu_util_threshold || '15';
-                document.getElementById('cfg-reserved').value = c.reserved_gpu_count || '0';
-                document.getElementById('cfg-gpu-lock-ttl-train').value = c.gpu_lock_ttl_train_seconds || '300';
-                document.getElementById('cfg-gpu-lock-ttl-deploy').value = c.gpu_lock_ttl_deploy_seconds || '300';
-                document.getElementById('cfg-server-groups').value = c.server_groups || '';
+                // 只在元素没有焦点时才更新配置输入框，避免覆盖用户正在编辑的内容
+                const configFields = [
+                    { id: 'cfg-train-mem', value: c.train_gpu_mem_threshold || '20' },
+                    { id: 'cfg-train-util', value: c.train_gpu_util_threshold || '15' },
+                    { id: 'cfg-test-mem', value: c.test_gpu_mem_threshold || '20' },
+                    { id: 'cfg-test-util', value: c.test_gpu_util_threshold || '15' },
+                    { id: 'cfg-reserved', value: c.reserved_gpu_count || '0' },
+                    { id: 'cfg-reserved-per-server', value: c.reserved_gpu_per_server || '' },
+                    { id: 'cfg-gpu-lock-ttl-train', value: c.gpu_lock_ttl_train_seconds || '300' },
+                    { id: 'cfg-gpu-lock-ttl-deploy', value: c.gpu_lock_ttl_deploy_seconds || '300' },
+                    { id: 'cfg-server-groups', value: c.server_groups || '' }
+                ];
+                configFields.forEach(field => {
+                    const el = document.getElementById(field.id);
+                    if (el && document.activeElement !== el) {
+                        el.value = field.value;
+                    }
+                });
                 // 解析分组配置
                 parseServerGroups(c.server_groups || '');
             }
@@ -931,6 +946,24 @@
         async function saveConfig() {
             const groupsStr = document.getElementById('cfg-server-groups').value || '';
             parseServerGroups(groupsStr);
+            // 验证保留卡数JSON格式
+            let reservedPerServer = document.getElementById('cfg-reserved-per-server').value.trim();
+            if (reservedPerServer) {
+                try {
+                    const parsed = JSON.parse(reservedPerServer);
+                    // 确保所有值都是数字
+                    for (const [k, v] of Object.entries(parsed)) {
+                        if (typeof v !== 'number' || v < 0 || !Number.isInteger(v)) {
+                            showMsg('err', `服务器 "${k}" 的保留卡数必须是正整数`);
+                            return;
+                        }
+                    }
+                    reservedPerServer = JSON.stringify(parsed);
+                } catch (e) {
+                    showMsg('err', '各服务器保留卡数配置格式错误，请使用有效的JSON格式，如 {"server1": 2, "server2": 1}');
+                    return;
+                }
+            }
             const d = await api('/api/cluster/config', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -940,6 +973,7 @@
                     test_gpu_mem_threshold: document.getElementById('cfg-test-mem').value,
                     test_gpu_util_threshold: document.getElementById('cfg-test-util').value,
                     reserved_gpu_count: document.getElementById('cfg-reserved').value,
+                    reserved_gpu_per_server: reservedPerServer,
                     gpu_lock_ttl_train_seconds: document.getElementById('cfg-gpu-lock-ttl-train').value,
                     gpu_lock_ttl_deploy_seconds: document.getElementById('cfg-gpu-lock-ttl-deploy').value,
                     server_groups: groupsStr
