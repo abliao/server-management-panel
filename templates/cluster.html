@@ -348,11 +348,11 @@
             <div class="form-row">
                 <div class="form-group">
                     <label>任务名</label>
-                    <input type="text" id="train-name" placeholder="exp_001">
+                    <input type="text" id="train-name" placeholder="exp_001" oninput="onTrainNameManualInput()">
                 </div>
                 <div class="form-group">
                     <label>task_name</label>
-                    <input type="text" id="train-task-name" placeholder="search_green_boxes">
+                    <input type="text" id="train-task-name" placeholder="search_green_boxes" onchange="autoGenerateTrainName()">
                 </div>
                 <div class="form-group">
                     <label>脚本路径(相对代码目录)</label>
@@ -372,7 +372,7 @@
                 </div>
                 <div class="form-group">
                     <label>是否norm</label>
-                    <input type="checkbox" id="train-norm">
+                    <input type="checkbox" id="train-norm" onchange="autoGenerateTrainName()">
                 </div>
                 <div class="form-group" style="display:flex;align-items:flex-end;">
                     <button class="btn btn-primary" onclick="submitTraining()">提交训练</button>
@@ -629,6 +629,33 @@
         // 服务器分组信息
         let serverGroups = [];  // 分组名称列表
         let serverToGroup = new Map();  // 服务器名到分组的映射
+        // 训练任务名是否被手动编辑过
+        let trainNameManuallyEdited = false;
+
+        // 训练任务名手动输入时设置标志
+        function onTrainNameManualInput() {
+            trainNameManuallyEdited = true;
+        }
+
+        // 根据 task_name 和 norm 自动生成训练任务名
+        function autoGenerateTrainName() {
+            // 如果用户手动编辑过任务名，不再自动生成
+            if (trainNameManuallyEdited) return;
+
+            const taskNameEl = document.getElementById('train-task-name');
+            const normEl = document.getElementById('train-norm');
+            const nameEl = document.getElementById('train-name');
+
+            if (!taskNameEl || !nameEl) return;
+
+            const taskName = taskNameEl.value.trim();
+            if (!taskName) return;
+
+            const useNorm = normEl && normEl.checked;
+            const autoName = useNorm ? taskName + '_norm' : taskName;
+
+            nameEl.value = autoName;
+        }
 
         function showMsg(type, text) {
             var msg = text ? String(text) : (type === 'ok' ? '成功' : '错误');
@@ -689,6 +716,8 @@
                 const raw = localStorage.getItem(TRAIN_FORM_KEY);
                 if (!raw) { showMsg('err', '暂无上次训练参数'); return; }
                 const d = JSON.parse(raw);
+                // 重置手动编辑标志，允许自动生成
+                trainNameManuallyEdited = false;
                 document.getElementById('train-name').value = d.name || '';
                 document.getElementById('train-task-name').value = d.task_name || '';
                 document.getElementById('train-script').value = d.script_path || '';
@@ -715,6 +744,9 @@
                     showMsg('err', '任务数据未找到，请刷新页面后重试');
                     return;
                 }
+
+                // 重置手动编辑标志，允许自动生成
+                trainNameManuallyEdited = false;
 
                 // 填充表单
                 document.getElementById('train-name').value = t.name || '';
@@ -1487,7 +1519,12 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
-            if (d.success) { showMsg('ok', '训练任务已提交，等待调度'); loadTraining(); }
+            if (d.success) {
+                showMsg('ok', '训练任务已提交，等待调度');
+                loadTraining();
+                // 重置手动编辑标志，下次新建任务时可以自动生成
+                trainNameManuallyEdited = false;
+            }
             else showMsg('err', d.error);
         }
 
