@@ -224,6 +224,39 @@
             background: #21262d;
             color: #c9d1d9;
         }
+
+        /* 美化复选框 */
+        input[type="checkbox"] {
+            -webkit-appearance: none;
+            -moz-appearance: none;
+            appearance: none;
+            width: 22px;
+            height: 22px;
+            border: 2px solid #30363d;
+            border-radius: 5px;
+            background: #0d1117;
+            cursor: pointer;
+            position: relative;
+            transition: all 0.2s ease;
+            vertical-align: middle;
+        }
+        input[type="checkbox"]:hover {
+            border-color: #58a6ff;
+        }
+        input[type="checkbox"]:checked {
+            background: #238636;
+            border-color: #238636;
+        }
+        input[type="checkbox"]:checked::after {
+            content: '\2714';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #fff;
+            font-size: 14px;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
@@ -337,6 +370,10 @@
                     <label>优先级(1-10)</label>
                     <input type="number" id="train-priority" value="5" min="1" max="10">
                 </div>
+                <div class="form-group">
+                    <label>是否norm</label>
+                    <input type="checkbox" id="train-norm">
+                </div>
                 <div class="form-group" style="display:flex;align-items:flex-end;">
                     <button class="btn btn-primary" onclick="submitTraining()">提交训练</button>
                 </div>
@@ -411,6 +448,10 @@
                     <select id="deploy-train-id" onchange="onDeployTrainChange()">
                         <option value="">不关联</option>
                     </select>
+                </div>
+                <div class="form-group">
+                    <label>是否norm</label>
+                    <input type="checkbox" id="deploy-norm">
                 </div>
                 <div class="form-group" style="display:flex;align-items:flex-end;">
                     <button class="btn btn-primary" onclick="submitDeploy()">提交部署</button>
@@ -627,7 +668,7 @@
             alert: true,
         };
 
-        function saveLastTrainForm(payload, allowedServers) {
+        function saveLastTrainForm(payload, allowedServers, useNorm) {
             try {
                 const data = {
                     name: payload.name || '',
@@ -636,6 +677,7 @@
                     script_args: payload.script_args || '',
                     priority: payload.priority || 5,
                     gpu_count: payload.gpu_count || 1,
+                    use_norm: !!useNorm,
                     allowed_servers: allowedServers || []
                 };
                 localStorage.setItem(TRAIN_FORM_KEY, JSON.stringify(data));
@@ -653,6 +695,7 @@
                 document.getElementById('train-args').value = d.script_args || '';
                 document.getElementById('train-priority').value = d.priority || 5;
                 document.getElementById('train-gpu-count').value = d.gpu_count || 1;
+                document.getElementById('train-norm').checked = !!d.use_norm;
                 if (Array.isArray(d.allowed_servers) && d.allowed_servers.length > 0) {
                     document.querySelectorAll('.train-server-cb').forEach(cb => {
                         cb.checked = d.allowed_servers.includes(cb.value);
@@ -672,7 +715,7 @@
                     showMsg('err', '任务数据未找到，请刷新页面后重试');
                     return;
                 }
-                
+
                 // 填充表单
                 document.getElementById('train-name').value = t.name || '';
                 document.getElementById('train-task-name').value = t.task_name || '';
@@ -680,7 +723,8 @@
                 document.getElementById('train-args').value = t.script_args || '';
                 document.getElementById('train-gpu-count').value = t.gpu_count || 1;
                 document.getElementById('train-priority').value = t.priority || 5;
-                
+                document.getElementById('train-norm').checked = !!t.use_norm;
+
                 // 处理可选服务器
                 const allowedServers = t.allowed_servers || [];
                 if (Array.isArray(allowedServers) && allowedServers.length > 0) {
@@ -688,16 +732,16 @@
                         cb.checked = allowedServers.includes(cb.value);
                     });
                 }
-                
+
                 // 展开训练任务面板（如果折叠了）
                 const trainSection = document.getElementById('train-section-body');
                 if (trainSection && sectionCollapsed.train) {
                     toggleSection('train');
                 }
-                
+
                 // 滚动到训练表单
                 document.getElementById('train-name').scrollIntoView({ behavior: 'smooth', block: 'center' });
-                
+
                 showMsg('ok', `已加载任务 ${id} 的参数，修改后可重新提交`);
             } catch (e) {
                 showMsg('err', '恢复任务参数失败: ' + e.message);
@@ -804,7 +848,7 @@
             realEls.forEach(el => el.style.display = (type === 'real') ? '' : 'none');
         }
 
-        function saveLastDeployForm(payload, allowedServers, step) {
+        function saveLastDeployForm(payload, allowedServers, step, useNorm) {
             try {
                 const data = {
                     name: payload.name || '',
@@ -814,6 +858,7 @@
                     priority: payload.priority || 5,
                     port: payload.port || '',
                     training_task_id: payload.training_task_id || '',
+                    use_norm: !!useNorm,
                     allowed_servers: allowedServers || []
                 };
                 localStorage.setItem(DEPLOY_FORM_KEY, JSON.stringify(data));
@@ -832,6 +877,7 @@
                 document.getElementById('deploy-priority').value = d.priority || 5;
                 document.getElementById('deploy-port').value = d.port || '';
                 document.getElementById('deploy-train-id').value = d.training_task_id || '';
+                document.getElementById('deploy-norm').checked = !!d.use_norm;
                 if (Array.isArray(d.allowed_servers) && d.allowed_servers.length > 0) {
                     document.querySelectorAll('.deploy-server-cb').forEach(cb => {
                         cb.checked = d.allowed_servers.includes(cb.value);
@@ -864,6 +910,7 @@
                 document.getElementById('deploy-priority').value = t.priority || 5;
                 document.getElementById('deploy-port').value = t.port || '';
                 document.getElementById('deploy-train-id').value = t.training_task_id || '';
+                document.getElementById('deploy-norm').checked = !!t.use_norm;
 
                 // 处理可选服务器
                 const allowedServers = t.allowed_servers || [];
@@ -1379,6 +1426,7 @@
             const portRaw = document.getElementById('deploy-port').value.trim();
             const port = portRaw ? parseInt(portRaw, 10) : null;
             const trainId = document.getElementById('deploy-train-id').value.trim();
+            const useNorm = document.getElementById('deploy-norm').checked;
             const allowedServers = getDeploySelectedServers();
             if (!name || !script) { showMsg('err', '任务名和脚本路径必填'); return; }
             if (portRaw && (isNaN(port) || port < 1 || port > 65535)) { showMsg('err', '端口范围应为 1-65535'); return; }
@@ -1393,10 +1441,11 @@
                 weight_path: finalWeightPath,
                 priority: isNaN(priority) ? 5 : priority,
                 port: port,
-                training_task_id: trainId || null
+                training_task_id: trainId || null,
+                use_norm: useNorm
             };
             if (allowedServers.length > 0) payload.allowed_servers = allowedServers;
-            saveLastDeployForm(payload, allowedServers, step);
+            saveLastDeployForm(payload, allowedServers, step, useNorm);
             const d = await api('/api/cluster/deploy/submit', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1413,20 +1462,26 @@
             const args = document.getElementById('train-args').value.trim();
             const priority = document.getElementById('train-priority').value;
             const gpuCount = parseInt(document.getElementById('train-gpu-count').value || '1', 10);
+            const useNorm = document.getElementById('train-norm').checked;
             const allowedServers = getTrainSelectedServers();
             if (!name || !script) { showMsg('err', '任务名和脚本路径必填'); return; }
             if (!taskName) { showMsg('err', 'task_name 必填'); return; }
+            // 如果勾选了 --norm，添加到脚本参数中
+            let finalArgs = args;
+            if (useNorm) {
+                finalArgs = args ? args + ' --norm' : '--norm';
+            }
             const payload = {
                 name,
                 task_name: taskName,
                 script_path: script,
-                script_args: args,
+                script_args: finalArgs,
                 priority: parseInt(priority),
                 gpu_count: isNaN(gpuCount) || gpuCount < 1 ? 1 : gpuCount
             };
             if (allowedServers.length > 0) payload.allowed_servers = allowedServers;
             // 本地记录上一次训练参数，方便复用
-            saveLastTrainForm(payload, allowedServers);
+            saveLastTrainForm(payload, allowedServers, useNorm);
             const d = await api('/api/cluster/training/submit', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },

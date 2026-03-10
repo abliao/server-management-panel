@@ -224,7 +224,11 @@ class DatabaseManager:
             # 迁移：为部署任务表添加 training_task_id
             if 'training_task_id' not in deploy_cols:
                 cursor.execute("ALTER TABLE deploy_tasks ADD COLUMN training_task_id INTEGER REFERENCES training_tasks(id)")
-            
+
+            # 迁移：为部署任务表添加 use_norm
+            if 'use_norm' not in deploy_cols:
+                cursor.execute("ALTER TABLE deploy_tasks ADD COLUMN use_norm INTEGER DEFAULT 0")
+
             # 模型权重记录表
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS model_weights (
@@ -792,15 +796,16 @@ class DatabaseManager:
         }
 
     # ========== 部署任务 ==========
-    def add_deploy_task(self, name, script_path, weight_path='', priority=5, allowed_servers=None, port=None, training_task_id=None):
+    def add_deploy_task(self, name, script_path, weight_path='', priority=5, allowed_servers=None, port=None, training_task_id=None, use_norm=False):
         try:
             allowed_str = json.dumps(allowed_servers or []) if allowed_servers is not None else '[]'
+            use_norm_val = 1 if use_norm else 0
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO deploy_tasks (name, script_path, weight_path, priority, allowed_servers, status, port, training_task_id)
-                    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
-                ''', (name, script_path, weight_path, int(priority), allowed_str, port, training_task_id))
+                    INSERT INTO deploy_tasks (name, script_path, weight_path, priority, allowed_servers, status, port, training_task_id, use_norm)
+                    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                ''', (name, script_path, weight_path, int(priority), allowed_str, port, training_task_id, use_norm_val))
                 conn.commit()
                 return True, cursor.lastrowid
         except Exception as e:
@@ -890,7 +895,8 @@ class DatabaseManager:
             'status': row[8], 'log_path': row[9], 'pid': row[10], 'created_at': row[11],
             'started_at': row[12], 'finished_at': row[13], 'result': row[14],
             'port': row[15] if len(row) > 15 else None,
-            'training_task_id': row[16] if len(row) > 16 else None
+            'training_task_id': row[16] if len(row) > 16 else None,
+            'use_norm': bool(row[17]) if len(row) > 17 else False
         }
     
     # ========== 模型权重 ==========

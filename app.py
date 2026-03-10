@@ -854,13 +854,15 @@ def run_deploy_on_server(task, server, gpu_ids):
     script = task.get('script_path') or ''
     weight = task.get('weight_path') or ''
     port = task.get('port')
+    use_norm = task.get('use_norm', False)
     gpu_str = ','.join(map(str, gpu_ids)) if gpu_ids else ''
     env = f'CUDA_VISIBLE_DEVICES={gpu_str}' if gpu_str else ''
     log_path = f"{str(code_path).rstrip('/')}/outputs/logs/deploy_{task['id']}_{int(time.time())}.log"
     runner = 'bash' if script.lower().endswith('.sh') else 'python'
     weight_arg = f' --weight {weight}' if weight else ''
     port_arg = f' --port {port}' if port not in (None, '') else ''
-    launch_core = f'{runner} {script}{weight_arg}{port_arg}'.strip()
+    norm_arg = ' --norm' if use_norm else ''
+    launch_core = f'{runner} {script}{weight_arg}{port_arg}{norm_arg}'.strip()
     launch_cmd = f'{env} {launch_core}'.strip()
     exec_cmd = f'env {env} {launch_core}'.strip() if env else launch_core
     preamble_cmd = _build_log_preamble_cmd(log_path, [
@@ -872,7 +874,7 @@ def run_deploy_on_server(task, server, gpu_ids):
         f'[LAUNCH_CMD] {launch_cmd}'
     ])
     cmd = f'mkdir -p outputs/logs; {preamble_cmd}; nohup {exec_cmd} >> {shlex.quote(log_path)} 2>&1 & echo $!'
-    logger.info(f"[RunDeploy] task_id={task['id']} server={server['name']} script={script} weight={weight} port={port} log={log_path}")
+    logger.info(f"[RunDeploy] task_id={task['id']} server={server['name']} script={script} weight={weight} port={port} use_norm={use_norm} log={log_path}")
     logger.info(f"[RunDeploy] full_cmd= {cmd}")
     ok, out = execute_ssh_command_silent(server, cmd, timeout=30)
     if not ok:
@@ -1895,6 +1897,7 @@ def submit_deploy_task():
     priority = int(data.get('priority', 5))
     port = data.get('port')
     training_task_id = data.get('training_task_id')
+    use_norm = data.get('use_norm', False)
     try:
         port = int(port) if port not in (None, '') else None
     except (TypeError, ValueError):
@@ -1922,7 +1925,8 @@ def submit_deploy_task():
         priority=priority,
         allowed_servers=allowed_servers,
         port=port,
-        training_task_id=training_task_id
+        training_task_id=training_task_id,
+        use_norm=use_norm
     )
     if not ok:
         return jsonify({'success': False, 'error': str(result)})
