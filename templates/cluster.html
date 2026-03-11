@@ -748,14 +748,21 @@
                 // 重置手动编辑标志，允许自动生成
                 trainNameManuallyEdited = false;
 
+                // 从 script_args 中检测是否包含 --norm，并移除它（因为通过复选框单独控制）
+                let scriptArgs = t.script_args || '';
+                const hasNorm = scriptArgs.includes('--norm');
+                if (hasNorm) {
+                    scriptArgs = scriptArgs.replace(/\s*--norm\s*/g, ' ').trim();
+                }
+
                 // 填充表单
                 document.getElementById('train-name').value = t.name || '';
                 document.getElementById('train-task-name').value = t.task_name || '';
                 document.getElementById('train-script').value = t.script_path || '';
-                document.getElementById('train-args').value = t.script_args || '';
+                document.getElementById('train-args').value = scriptArgs;
                 document.getElementById('train-gpu-count').value = t.gpu_count || 1;
                 document.getElementById('train-priority').value = t.priority || 5;
-                document.getElementById('train-norm').checked = !!t.use_norm;
+                document.getElementById('train-norm').checked = hasNorm;
 
                 // 处理可选服务器
                 const allowedServers = t.allowed_servers || [];
@@ -1498,10 +1505,14 @@
             const allowedServers = getTrainSelectedServers();
             if (!name || !script) { showMsg('err', '任务名和脚本路径必填'); return; }
             if (!taskName) { showMsg('err', 'task_name 必填'); return; }
-            // 如果勾选了 --norm，添加到脚本参数中
+            // 如果勾选了 --norm，添加到脚本参数中（避免重复添加）
             let finalArgs = args;
-            if (useNorm) {
+            const hasNorm = args.includes('--norm');
+            if (useNorm && !hasNorm) {
                 finalArgs = args ? args + ' --norm' : '--norm';
+            } else if (!useNorm && hasNorm) {
+                // 如果取消了勾选但参数中还有 --norm，移除它
+                finalArgs = args.replace(/\s*--norm\s*/g, ' ').trim();
             }
             const payload = {
                 name,
