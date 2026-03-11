@@ -1293,7 +1293,22 @@
             const task = deployTaskCache.find(t => String(t.id) === id);
             if (!task) return;
             if (task.server_name) document.getElementById('test-server').value = task.server_name;
-            if (task.name) document.getElementById('test-mock-task-name').value = task.name;
+            // 优先使用部署任务关联的训练任务的 task_name
+            let taskNameToUse = '';
+            if (task.training_task_id) {
+                const trainTask = trainTaskCacheForDeploy.find(t => String(t.id) === String(task.training_task_id));
+                if (trainTask && trainTask.task_name) {
+                    taskNameToUse = trainTask.task_name;
+                }
+            }
+            // 如果没有找到训练任务的 task_name，则使用部署任务的 name
+            if (!taskNameToUse && task.name) {
+                taskNameToUse = task.name;
+            }
+            
+            if (taskNameToUse) {
+                document.getElementById('test-mock-task-name').value = taskNameToUse;
+            }
             if (task.port) document.getElementById('test-mock-url').value = `http://127.0.0.1:${task.port}`;
             // 如果测试任务名为空，自动使用部署任务名
             const nameInput = document.getElementById('test-name');
@@ -1344,6 +1359,12 @@
             const nameInput = document.getElementById('deploy-name');
             if (task.name) {
                 nameInput.value = task.name;
+            }
+            // 自动同步训练任务的 norm 状态
+            const normInput = document.getElementById('deploy-norm');
+            const taskHasNorm = task.script_args && task.script_args.includes('--norm');
+            if (normInput) {
+                normInput.checked = taskHasNorm;
             }
             // 自动选择与训练任务服务器同组的服务器
             if (task.server_name) {

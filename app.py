@@ -2050,16 +2050,16 @@ def submit_test_task():
             deploy_task_id = int(deploy_task_id_raw)
         except (TypeError, ValueError):
             return jsonify({'success': False, 'error': '部署任务ID格式错误'})
-    # 选择了部署任务ID时，自动回填服务器、task_name、url
+    # 选择了部署任务ID时，自动回填服务器、url
+    # 注意：不要强行覆盖前端传入的 mock_task_name，保持测试任务自己的 task_name
     if deploy_task_id is not None:
         deploy_task = db.get_deploy_task(deploy_task_id)
         if not deploy_task:
             return jsonify({'success': False, 'error': '指定部署任务不存在'})
-        if deploy_task.get('server_name'):
+        if deploy_task.get('server_name') and not server_name:
             server_name = (deploy_task.get('server_name') or '').strip()
-        if deploy_task.get('name'):
-            mock_task_name = (deploy_task.get('name') or '').strip()
-        if deploy_task.get('port'):
+        # 仅在前端未提供 URL 时，才根据部署任务端口填充本地回环地址
+        if deploy_task.get('port') and not mock_url:
             mock_url = f"http://127.0.0.1:{int(deploy_task.get('port'))}"
 
     if not name:
