@@ -722,6 +722,15 @@ def run_training_on_server(task, server, gpu_ids):
     env_prefix = f'CUDA_VISIBLE_DEVICES={gpu_str}' if gpu_str else ''
     has_task_name_arg = bool(re.search(r'(^|\s)--task_name(?:\s|=)', args))
     task_name_part = f' --task_name {shlex.quote(task_name)}' if task_name and not has_task_name_arg else ''
+    batch_size = task.get('batch_size')
+    if batch_size is not None and batch_size != '':
+        try:
+            bs_int = int(batch_size)
+            has_bs_arg = bool(re.search(r'(^|\s)--batch_size(?:\s|=)', args))
+            if not has_bs_arg:
+                task_name_part += f' --batch_size {bs_int}'
+        except (TypeError, ValueError):
+            pass
     launch_core = f'{runner} {script} {args}{task_name_part}'.strip()
     launch_cmd = f'{env_prefix} {launch_core}'.strip()
     exec_cmd = f'env {env_prefix} {launch_core}'.strip() if env_prefix else launch_core
@@ -1772,14 +1781,24 @@ def submit_training_task():
     priority = int(data.get('priority', 5))
     gpu_count = data.get('gpu_count', 1)
     allowed_servers = data.get('allowed_servers')  # 可选，服务器名列表；空/不传表示所有服务器
-    logger.info(f"[API] submit_training_task name={name} task_name={task_name} script={script_path} args={script_args} priority={priority} gpu_count={gpu_count} allowed_servers={allowed_servers}")
+    batch_size_raw = data.get('batch_size')
+    batch_size = None
+    if batch_size_raw not in (None, ''):
+        try:
+            batch_size = int(batch_size_raw)
+        except (TypeError, ValueError):
+            pass
+    # 若填写了 batch_size，任务名自动加后缀 _{bs}
+    if batch_size is not None and name and not name.endswith(f'_{batch_size}'):
+        name = f'{name}_{batch_size}'
+    logger.info(f"[API] submit_training_task name={name} task_name={task_name} script={script_path} args={script_args} priority={priority} gpu_count={gpu_count} batch_size={batch_size} allowed_servers={allowed_servers}")
     if not name or not script_path:
         return jsonify({'success': False, 'error': '任务名和脚本路径必填'})
     if not task_name:
         return jsonify({'success': False, 'error': 'task_name 必填'})
     ok, result = db.add_training_task(
         name, script_path, script_args, priority,
-        gpu_count=gpu_count, allowed_servers=allowed_servers, task_name=task_name
+        gpu_count=gpu_count, allowed_servers=allowed_servers, task_name=task_name, batch_size=batch_size
     )
     if not ok:
         return jsonify({'success': False, 'error': str(result)})

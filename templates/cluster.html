@@ -367,6 +367,10 @@
                     <input type="number" id="train-gpu-count" value="1" min="1" max="8">
                 </div>
                 <div class="form-group">
+                    <label>batch_size(可选)</label>
+                    <input type="number" id="train-batch-size" value="8" min="1" placeholder="如 32" onchange="autoGenerateTrainName()" oninput="autoGenerateTrainName()">
+                </div>
+                <div class="form-group">
                     <label>优先级(1-10)</label>
                     <input type="number" id="train-priority" value="5" min="1" max="10">
                 </div>
@@ -637,13 +641,14 @@
             trainNameManuallyEdited = true;
         }
 
-        // 根据 task_name 和 norm 自动生成训练任务名
+        // 根据 task_name、norm、batch_size 自动生成训练任务名（任务名加后缀 _norm、_{bs}）
         function autoGenerateTrainName() {
             // 如果用户手动编辑过任务名，不再自动生成
             if (trainNameManuallyEdited) return;
 
             const taskNameEl = document.getElementById('train-task-name');
             const normEl = document.getElementById('train-norm');
+            const bsEl = document.getElementById('train-batch-size');
             const nameEl = document.getElementById('train-name');
 
             if (!taskNameEl || !nameEl) return;
@@ -652,8 +657,12 @@
             if (!taskName) return;
 
             const useNorm = normEl && normEl.checked;
-            const autoName = useNorm ? taskName + '_norm' : taskName;
-
+            let autoName = useNorm ? taskName + '_norm' : taskName;
+            const bsRaw = bsEl && bsEl.value ? String(bsEl.value).trim() : '';
+            if (bsRaw) {
+                const bsNum = parseInt(bsRaw, 10);
+                if (!isNaN(bsNum) && bsNum > 0) autoName = autoName + '_' + bsNum;
+            }
             nameEl.value = autoName;
         }
 
@@ -704,6 +713,7 @@
                     script_args: payload.script_args || '',
                     priority: payload.priority || 5,
                     gpu_count: payload.gpu_count || 1,
+                    batch_size: payload.batch_size !== undefined && payload.batch_size !== '' ? payload.batch_size : '',
                     use_norm: !!useNorm,
                     allowed_servers: allowedServers || []
                 };
@@ -724,6 +734,7 @@
                 document.getElementById('train-args').value = d.script_args || '';
                 document.getElementById('train-priority').value = d.priority || 5;
                 document.getElementById('train-gpu-count').value = d.gpu_count || 1;
+                document.getElementById('train-batch-size').value = d.batch_size !== undefined && d.batch_size !== '' ? d.batch_size : '';
                 document.getElementById('train-norm').checked = !!d.use_norm;
                 if (Array.isArray(d.allowed_servers) && d.allowed_servers.length > 0) {
                     document.querySelectorAll('.train-server-cb').forEach(cb => {
@@ -762,6 +773,7 @@
                 document.getElementById('train-args').value = scriptArgs;
                 document.getElementById('train-gpu-count').value = t.gpu_count || 1;
                 document.getElementById('train-priority').value = t.priority || 5;
+                document.getElementById('train-batch-size').value = t.batch_size !== undefined && t.batch_size !== null && t.batch_size !== '' ? t.batch_size : '';
                 document.getElementById('train-norm').checked = hasNorm;
 
                 // 处理可选服务器
@@ -1522,6 +1534,9 @@
             const args = document.getElementById('train-args').value.trim();
             const priority = document.getElementById('train-priority').value;
             const gpuCount = parseInt(document.getElementById('train-gpu-count').value || '1', 10);
+            const batchSizeEl = document.getElementById('train-batch-size');
+            const batchSizeRaw = batchSizeEl && batchSizeEl.value ? batchSizeEl.value.trim() : '';
+            const batchSize = batchSizeRaw ? parseInt(batchSizeRaw, 10) : null;
             const useNorm = document.getElementById('train-norm').checked;
             const allowedServers = getTrainSelectedServers();
             if (!name || !script) { showMsg('err', '任务名和脚本路径必填'); return; }
@@ -1543,6 +1558,7 @@
                 priority: parseInt(priority),
                 gpu_count: isNaN(gpuCount) || gpuCount < 1 ? 1 : gpuCount
             };
+            if (batchSize !== null && !isNaN(batchSize) && batchSize > 0) payload.batch_size = batchSize;
             if (allowedServers.length > 0) payload.allowed_servers = allowedServers;
             // 本地记录上一次训练参数，方便复用
             saveLastTrainForm(payload, allowedServers, useNorm);
