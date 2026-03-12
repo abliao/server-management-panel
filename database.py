@@ -135,6 +135,8 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE training_tasks ADD COLUMN task_name TEXT DEFAULT ''")
             if 'batch_size' not in train_cols:
                 cursor.execute("ALTER TABLE training_tasks ADD COLUMN batch_size INTEGER")
+            if 'state_mask_prob' not in train_cols:
+                cursor.execute("ALTER TABLE training_tasks ADD COLUMN state_mask_prob REAL")
             
             # 测试任务表
             cursor.execute('''
@@ -565,8 +567,8 @@ class DatabaseManager:
             return False
     
     # ========== 训练任务 ==========
-    def add_training_task(self, name, script_path, script_args='', priority=5, gpu_count=1, allowed_servers=None, task_name='', batch_size=None):
-        """allowed_servers: 可选服务器名列表，空/None 表示所有服务器可用；gpu_count: 任务需要的 GPU 数量；batch_size: 可选"""
+    def add_training_task(self, name, script_path, script_args='', priority=5, gpu_count=1, allowed_servers=None, task_name='', batch_size=None, state_mask_prob=None):
+        """allowed_servers: 可选服务器名列表，空/None 表示所有服务器可用；gpu_count: 任务需要的 GPU 数量；batch_size/state_mask_prob: 可选"""
         try:
             # 规范化 gpu_count
             try:
@@ -582,14 +584,21 @@ class DatabaseManager:
                     batch_size_val = int(batch_size)
                 except (TypeError, ValueError):
                     pass
+            
+            state_mask_prob_val = None
+            if state_mask_prob not in (None, ''):
+                try:
+                    state_mask_prob_val = float(state_mask_prob)
+                except (TypeError, ValueError):
+                    pass
 
             allowed_str = json.dumps(allowed_servers or []) if allowed_servers is not None else '[]'
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO training_tasks (name, script_path, script_args, priority, gpu_ids, status, log_path, weight_path, pid, created_at, started_at, finished_at, error_message, server_name, allowed_servers, gpu_count, task_name, batch_size)
-                    VALUES (?, ?, ?, ?, NULL, 'pending', NULL, NULL, NULL, CURRENT_TIMESTAMP, NULL, NULL, NULL, NULL, ?, ?, ?, ?)
-                ''', (name, script_path, script_args, priority, allowed_str, gpu_count_int, task_name, batch_size_val))
+                    INSERT INTO training_tasks (name, script_path, script_args, priority, gpu_ids, status, log_path, weight_path, pid, created_at, started_at, finished_at, error_message, server_name, allowed_servers, gpu_count, task_name, batch_size, state_mask_prob)
+                    VALUES (?, ?, ?, ?, NULL, 'pending', NULL, NULL, NULL, CURRENT_TIMESTAMP, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?)
+                ''', (name, script_path, script_args, priority, allowed_str, gpu_count_int, task_name, batch_size_val, state_mask_prob_val))
                 conn.commit()
                 return True, cursor.lastrowid
         except Exception as e:
@@ -597,7 +606,7 @@ class DatabaseManager:
     
     def update_training_task(self, task_id, **kwargs):
         try:
-            allowed = {'server_name', 'gpu_ids', 'status', 'log_path', 'weight_path', 'pid', 'started_at', 'finished_at', 'error_message', 'script_path', 'gpu_count', 'batch_size'}
+            allowed = {'server_name', 'gpu_ids', 'status', 'log_path', 'weight_path', 'pid', 'started_at', 'finished_at', 'error_message', 'script_path', 'gpu_count', 'batch_size', 'state_mask_prob'}
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 updates = []
@@ -689,7 +698,8 @@ class DatabaseManager:
             'allowed_servers': allowed,
             'gpu_count': gpu_count,
             'task_name': row[17] if len(row) > 17 else '',
-            'batch_size': row[18] if len(row) > 18 else None
+            'batch_size': row[18] if len(row) > 18 else None,
+            'state_mask_prob': row[19] if len(row) > 19 else None
         }
     
     # ========== 测试任务 ==========

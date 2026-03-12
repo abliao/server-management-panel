@@ -371,6 +371,10 @@
                     <input type="number" id="train-batch-size" value="8" min="1" placeholder="如 32" onchange="autoGenerateTrainName()" oninput="autoGenerateTrainName()">
                 </div>
                 <div class="form-group">
+                    <label>state_mask_prob</label>
+                    <input type="number" id="train-state-mask-prob" value="0.3" min="0" max="1" step="0.01" onchange="autoGenerateTrainName()" oninput="autoGenerateTrainName()">
+                </div>
+                <div class="form-group">
                     <label>优先级(1-10)</label>
                     <input type="number" id="train-priority" value="5" min="1" max="10">
                 </div>
@@ -714,6 +718,7 @@
                     priority: payload.priority || 5,
                     gpu_count: payload.gpu_count || 1,
                     batch_size: payload.batch_size !== undefined && payload.batch_size !== '' ? payload.batch_size : '',
+                    state_mask_prob: payload.state_mask_prob !== undefined && payload.state_mask_prob !== '' ? payload.state_mask_prob : '',
                     use_norm: !!useNorm,
                     allowed_servers: allowedServers || []
                 };
@@ -735,6 +740,7 @@
                 document.getElementById('train-priority').value = d.priority || 5;
                 document.getElementById('train-gpu-count').value = d.gpu_count || 1;
                 document.getElementById('train-batch-size').value = d.batch_size !== undefined && d.batch_size !== '' ? d.batch_size : '';
+                document.getElementById('train-state-mask-prob').value = d.state_mask_prob !== undefined && d.state_mask_prob !== '' ? d.state_mask_prob : '0.3';
                 document.getElementById('train-norm').checked = !!d.use_norm;
                 if (Array.isArray(d.allowed_servers) && d.allowed_servers.length > 0) {
                     document.querySelectorAll('.train-server-cb').forEach(cb => {
@@ -774,6 +780,7 @@
                 document.getElementById('train-gpu-count').value = t.gpu_count || 1;
                 document.getElementById('train-priority').value = t.priority || 5;
                 document.getElementById('train-batch-size').value = t.batch_size !== undefined && t.batch_size !== null && t.batch_size !== '' ? t.batch_size : '';
+                document.getElementById('train-state-mask-prob').value = t.state_mask_prob !== undefined && t.state_mask_prob !== null && t.state_mask_prob !== '' ? t.state_mask_prob : '0.3';
                 document.getElementById('train-norm').checked = hasNorm;
 
                 // 处理可选服务器
@@ -1537,6 +1544,9 @@
             const batchSizeEl = document.getElementById('train-batch-size');
             const batchSizeRaw = batchSizeEl && batchSizeEl.value ? batchSizeEl.value.trim() : '';
             const batchSize = batchSizeRaw ? parseInt(batchSizeRaw, 10) : null;
+            const smpEl = document.getElementById('train-state-mask-prob');
+            const smpRaw = smpEl && smpEl.value ? smpEl.value.trim() : '';
+            const stateMaskProb = smpRaw ? parseFloat(smpRaw) : null;
             const useNorm = document.getElementById('train-norm').checked;
             const allowedServers = getTrainSelectedServers();
             if (!name || !script) { showMsg('err', '任务名和脚本路径必填'); return; }
@@ -1559,6 +1569,7 @@
                 gpu_count: isNaN(gpuCount) || gpuCount < 1 ? 1 : gpuCount
             };
             if (batchSize !== null && !isNaN(batchSize) && batchSize > 0) payload.batch_size = batchSize;
+            if (stateMaskProb !== null && !isNaN(stateMaskProb)) payload.state_mask_prob = stateMaskProb;
             if (allowedServers.length > 0) payload.allowed_servers = allowedServers;
             // 本地记录上一次训练参数，方便复用
             saveLastTrainForm(payload, allowedServers, useNorm);
